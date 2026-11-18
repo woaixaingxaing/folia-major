@@ -2919,9 +2919,7 @@ export default function App() {
                 animejs 不进 bootstrap chunk。 */}
             <PonderHost theme={theme} isDaylight={isDaylight} />
 
-            {currentView === 'player' && !(isLyricMatchOpen && isLocalPlaybackSong(currentSong)) && (
-                <PlayerPanel model={playerPanelModel} />
-            )}
+            {/* [local-only] 播放器面板是另一个页面，本分支只剩海报墙，不再挂载。 */}
 
             <ThemeQuickEditorHost onSaveAiTheme={saveEditedAiDualTheme} onSaveCustomTheme={saveCustomDualTheme} />
 
@@ -2939,12 +2937,7 @@ export default function App() {
             />
 
             {/* 速记簿：左缘的把手与滑出的抽屉，非模态，三个视图里都在；播放页隐藏 UI 时把手跟着藏起来。 */}
-            <ScratchpadHost
-                isDaylight={isDaylight}
-                playback={scratchpadPlayback}
-                queue={scratchpadQueue}
-                isHandleHidden={currentView === 'player' && isPlayerChromeHidden}
-            />
+            {/* [local-only] 记笔记的浮层不再挂载：本地曲库用不到，用户也明确说不要。 */}
 
             <CommandPalette
                 activeIndex={commandPalette.activeIndex}
