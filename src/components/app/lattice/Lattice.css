@@ -276,3 +276,8 @@
 .lattice-poster.is-expanded .lattice-quick-button svg { width: 18px; height: 18px; }
 
 :root[data-reduce-motion~='lattice'] .lattice-quick { transition: none; }
+
+/* [local-only] 封面左上角那个序号（240 这种）没有用处：本地曲库不是队列，数字只会分心。 */
+.lattice-poster-badge.is-index {
+    display: none !important;
+}
