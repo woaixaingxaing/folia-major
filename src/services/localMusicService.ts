@@ -944,7 +944,8 @@ async function buildImportedSong(
         matchedLyricsProviderPlatform: existingSong?.matchedLyricsProviderPlatform,
         noAutoMatch: existingSong?.noAutoMatch,
         lyricsSource: existingSong?.lyricsSource,
-        useOnlineCover: existingSong?.useOnlineCover,
+          // [local-only] Never inherit an online cover from an earlier run.
+          useOnlineCover: false,
     };
 
     fileHandleMap.set(songId, fileHandle);
@@ -1413,7 +1414,8 @@ export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
                     }, {
                         songPatch: {
                             ...song,
-                            useOnlineCover: Boolean(coverUrl && !hasLocalSongCover(song)),
+                            // [local-only] Covers come from the file itself; an online cover is never used.
+                              useOnlineCover: false,
                         },
                         protectOrigins: ['manual', 'manual-match', 'split'],
                         skipIfMarkedPureMusic: true,
@@ -1460,7 +1462,7 @@ export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
                 album: matchedMetadata.album,
                 coverUrl: coverUrl?.replace('http:', 'https:'),
             }, {
-                songPatch: { ...song, useOnlineCover: Boolean(coverUrl && !hasLocalSongCover(song)) },
+                songPatch: { ...song, useOnlineCover: false },
                 protectOrigins: ['manual', 'manual-match', 'split'],
                 skipIfMarkedPureMusic: true,
             });
@@ -1492,7 +1494,7 @@ export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
             album: matchedMetadata.album,
             coverUrl: coverUrl?.replace('http:', 'https:'),
         }, {
-            songPatch: { ...song, useOnlineCover: Boolean(coverUrl && !hasLocalSongCover(song)) },
+            songPatch: { ...song, useOnlineCover: false },
             protectOrigins: ['manual', 'manual-match', 'split'],
             skipIfMarkedPureMusic: true,
         });

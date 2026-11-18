@@ -168,7 +168,8 @@ export const useDesktopSettingsStore = create<DesktopSettingsState>((set, get) =
     remoteControlExpandCover: getStoredBoolean(REMOTE_CONTROL_EXPAND_COVER_STORAGE_KEY, true),
     remoteControlTextShade: getStoredBoolean(REMOTE_CONTROL_TEXT_SHADE_STORAGE_KEY, false),
     remoteControlLyricLayout: parseRemoteLyricLayout(getStoredString(REMOTE_CONTROL_LYRIC_LAYOUT_STORAGE_KEY, '')) ?? DEFAULT_REMOTE_LYRIC_LAYOUT,
-    wallpaperMode: getStoredBoolean(WALLPAPER_MODE_STORAGE_KEY, false),
+        // [local-only] Wallpaper mode is the app's only mode, so it starts on and stays on.
+        wallpaperMode: getStoredBoolean(WALLPAPER_MODE_STORAGE_KEY, true),
     wallpaperEntryConfirmed: getStoredBoolean(WALLPAPER_ENTRY_CONFIRMED_STORAGE_KEY, false),
     wallpaperEntryConfirmOpen: false,
     wallpaperMacAutohideDock: getStoredBoolean(WALLPAPER_MAC_AUTOHIDE_DOCK_STORAGE_KEY, true),
@@ -224,10 +225,9 @@ export const useDesktopSettingsStore = create<DesktopSettingsState>((set, get) =
             patch.remoteControlTextShade = settings.REMOTE_CONTROL_TEXT_SHADE;
             setStoredBoolean(REMOTE_CONTROL_TEXT_SHADE_STORAGE_KEY, settings.REMOTE_CONTROL_TEXT_SHADE);
         }
-        if (typeof settings.wallpaper_mode === 'boolean') {
-            patch.wallpaperMode = settings.wallpaper_mode;
-            setStoredBoolean(WALLPAPER_MODE_STORAGE_KEY, settings.wallpaper_mode);
-        }
+          // [local-only] Wallpaper mode cannot be turned off: the stored value is ignored.
+          patch.wallpaperMode = true;
+          setStoredBoolean(WALLPAPER_MODE_STORAGE_KEY, true);
         if (typeof settings.wallpaper_entry_confirmed === 'boolean') {
             const confirmed = get().wallpaperEntryConfirmed || settings.wallpaper_entry_confirmed;
             patch.wallpaperEntryConfirmed = confirmed;
@@ -376,9 +376,12 @@ export const useDesktopSettingsStore = create<DesktopSettingsState>((set, get) =
     cancelWallpaperEntry: () => {
         set({ wallpaperEntryConfirmOpen: false });
     },
-    applyWallpaperMode: (enable) => {
-        setStoredBoolean(WALLPAPER_MODE_STORAGE_KEY, enable);
-        set({ wallpaperMode: enable });
+        applyWallpaperMode: (requested) => {
+            // [local-only] There is no other mode: a request to leave wallpaper mode is ignored.
+            const enable = true;
+            void requested;
+            setStoredBoolean(WALLPAPER_MODE_STORAGE_KEY, enable);
+            set({ wallpaperMode: enable });
         if (enable) {
             setStoredBoolean(WALLPAPER_ENTRY_CONFIRMED_STORAGE_KEY, true);
             set({ wallpaperEntryConfirmed: true });
