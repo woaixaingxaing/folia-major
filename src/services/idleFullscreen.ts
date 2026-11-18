@@ -24,6 +24,9 @@ export const installIdleFullscreen = (): void => {
 
     let timer: ReturnType<typeof setTimeout> | null = null;
     let active = false;
+    // 切换过程中（退出壁纸 → 全屏，或反过来）不接受新的唤醒：
+    // 那 400ms 里鼠标的微小移动会把整个流程打断，结果全屏刚起就被撤掉。
+    let switching = false;
     let lastX: number | null = null;
     let lastY: number | null = null;
 
@@ -31,21 +34,25 @@ export const installIdleFullscreen = (): void => {
     const wallpaper = useDesktopSettingsStore.getState();
 
     const enter = (): void => {
-        if (active || !isPlaying()) return;
+        if (active || switching || !isPlaying()) return;
         active = true;
+        switching = true;
         // 先离开壁纸模式，窗口才能进全屏而不被撕出桌面层。
         wallpaper.applyWallpaperMode(false);
         setTimeout(() => {
             void bridge.toggleFullscreenWindow?.();
+            switching = false;
         }, MODE_SWITCH_DELAY_MS);
     };
 
     const leave = (): void => {
-        if (!active) return;
+        if (!active || switching) return;
         active = false;
+        switching = true;
         void bridge.toggleFullscreenWindow?.();
         setTimeout(() => {
             useDesktopSettingsStore.getState().applyWallpaperMode(true);
+            switching = false;
         }, MODE_SWITCH_DELAY_MS);
     };
 
