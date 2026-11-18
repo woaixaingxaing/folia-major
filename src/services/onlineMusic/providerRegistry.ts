@@ -44,10 +44,26 @@ export const getOnlineMusicProvider = (providerId: OnlineProviderId): OnlineMusi
 
 export const listOnlineMusicProviders = (): OnlineMusicProvider[] => Array.from(providers.values());
 
+/**
+ * [local-only] No provider is registered in this build, but a saved session can still name one
+ * while the app starts. Throwing here took the whole window down with a blank page (the error
+ * surfaced before React mounted). This stand-in keeps startup alive and fails only if something
+ * actually tries to play or search through it.
+ */
+const unavailableProvider = (providerId: OnlineProviderId): OnlineMusicProvider => new Proxy({} as OnlineMusicProvider, {
+    get(_target, property) {
+        if (property === 'id') return providerId;
+        if (property === 'capabilities') return {};
+        return () => Promise.reject(
+            new OnlineProviderError('unavailable', `Online music provider is not registered: ${providerId}`, providerId),
+        );
+    },
+});
+
 export const requireOnlineMusicProvider = (providerId: OnlineProviderId): OnlineMusicProvider => {
     const provider = getOnlineMusicProvider(providerId);
     if (!provider) {
-        throw new OnlineProviderError('unavailable', `Online music provider is not registered: ${providerId}`, providerId);
+        return unavailableProvider(providerId);
     }
     return provider;
 };
