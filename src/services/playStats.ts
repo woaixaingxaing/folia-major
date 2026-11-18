@@ -1,48 +1,49 @@
 // src/services/playStats.ts
 //
-// [local-only] Listening statistics: how many plays fell on each day, and how much of them was
-// heard. Kept as running totals rather than one row per play, so the record stays a few
-// kilobytes however long the library is used. Written on this device only; the export exists so
-// a plain HTML page opened from disk can draw the heatmap.
+// [local-only] Listening statistics, kept per day AND per song, which is the smallest shape that
+// still answers every question the stats page asks: the totals for any range, the top artists and
+// songs in that range, and a drill-down from an artist to the songs heard in that range. Keeping
+// one row per play instead would only add resolution nobody reads. Written on this device only;
+// the export exists so a plain HTML page opened from disk can draw the whole thing.
 
 import type { SongResult } from '../types';
 
-const STORAGE_KEY = ['folia', 'play', 'stats', 'v1'].join('_');
-/** Longest stretch of the list kept: a heatmap never asks for more than a year and a bit. */
+const STORAGE_KEY = ['folia', 'play', 'stats', 'v2'].join('_');
+/** Longest stretch kept: a heatmap never asks for more than a year and a bit. */
 const KEEP_DAYS = 400;
 /** How long after a change the export is written, so a burst of plays writes once. */
 const EXPORT_DELAY_MS = 3000;
 
-export interface PlayStatsBucket {
-    /** Plays that fell on this day. */
+/** One song on one day. */
+export interface DaySongEntry {
+    /** Plays that started on this day. */
     p: number;
-    /** How much of them was heard, in milliseconds. */
+    /** How much of it was heard, in milliseconds. */
     ms: number;
 }
 
-export interface PlayStatsSong {
+export interface SongMeta {
     name: string;
     artist: string;
-    p: number;
-    ms: number;
 }
 
+/** dateKey → songKey → entry */
+type DayMap = Record<string, Record<string, DaySongEntry>>;
+
 interface PlayStatsStore {
-    v: 1;
-    /** Keyed by local date, "YYYY-MM-DD". */
-    days: Record<string, PlayStatsBucket>;
-    /** Keyed by song key, so a re-scanned file is still the same song. */
-    songs: Record<string, PlayStatsSong>;
+    v: 2;
+    days: DayMap;
+    /** Every song ever recorded, so a deleted file still has a name in the lists. */
+    songs: Record<string, SongMeta>;
     updatedAt: number;
 }
 
 export interface PlayStatsPayload {
+    version: 2;
     generatedAt: string;
     summary: { totalPlays: number; totalDurationMs: number; activeDays: number; trackedSince: string };
-    heatmap: Record<string, PlayStatsBucket>;
-    topSongs: PlayStatsSong[];
-    topArtists: Array<{ artist: string; p: number; ms: number }>;
-    last7Days: Array<{ date: string; p: number; ms: number }>;
+    days: DayMap;
+    songs: Record<string, SongMeta>;
 }
 
 const storage = () => (typeof localStorage === 'undefined' ? null : localStorage);
@@ -53,24 +54,26 @@ export const toLocalDateKey = (ts: number = Date.now()): string => {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-const emptyStore = (): PlayStatsStore => ({ v: 1, days: {}, songs: {}, updatedAt: 0 });
+const emptyStore = (): PlayStatsStore => ({ v: 2, days: {}, songs: {}, updatedAt: 0 });
 
 let cache: PlayStatsStore | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let exportTimer: ReturnType<typeof setTimeout> | null = null;
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const read = (): PlayStatsStore => {
     if (cache) return cache;
     try {
         const raw = storage()?.getItem(STORAGE_KEY);
         const parsed: unknown = raw ? JSON.parse(raw) : null;
-        if (parsed && typeof parsed === 'object' && (parsed as PlayStatsStore).v === 1) {
-            const store = parsed as PlayStatsStore;
+        if (isObject(parsed) && parsed.v === 2 && isObject(parsed.days) && isObject(parsed.songs)) {
             cache = {
-                v: 1,
-                days: store.days && typeof store.days === 'object' ? store.days : {},
-                songs: store.songs && typeof store.songs === 'object' ? store.songs : {},
-                updatedAt: Number(store.updatedAt) || 0,
+                v: 2,
+                days: parsed.days as DayMap,
+                songs: parsed.songs as Record<string, SongMeta>,
+                updatedAt: Number(parsed.updatedAt) || 0,
             };
             return cache;
         }
@@ -103,21 +106,24 @@ const prune = (store: PlayStatsStore, now: number): void => {
  * song left playing keeps adding time without being counted again.
  */
 export const recordPlayStats = (song: SongResult, songKey: string, deltaMs: number, countsAsPlay: boolean): void => {
-    if (!Number.isFinite(deltaMs) || deltaMs <= 0) return;
+    if (!Number.isFinite(deltaMs) || deltaMs <= 0 || !songKey) return;
     const store = read();
     const now = Date.now();
     const dayKey = toLocalDateKey(now);
 
-    const day = store.days[dayKey] ?? (store.days[dayKey] = { p: 0, ms: 0 });
-    day.ms += Math.round(deltaMs);
-    if (countsAsPlay) day.p += 1;
-
-    const artist = (song.artists ?? []).map(a => a.name).filter(Boolean).join(' / ') || '未知歌手';
-    const entry = store.songs[songKey] ?? (store.songs[songKey] = { name: song.name || '未知歌曲', artist, p: 0, ms: 0 });
-    entry.name = song.name || entry.name;
-    entry.artist = artist;
+    const day = store.days[dayKey] ?? (store.days[dayKey] = {});
+    const entry = day[songKey] ?? (day[songKey] = { p: 0, ms: 0 });
     entry.ms += Math.round(deltaMs);
     if (countsAsPlay) entry.p += 1;
+
+    // The name is kept beside the play so a file deleted later still reads as itself, not "未知歌曲".
+    const artist = (song.artists ?? []).map(a => a.name).filter(Boolean).join(' / ') || '未知歌手';
+    const meta = store.songs[songKey];
+    if (!meta) store.songs[songKey] = { name: song.name || '未知歌曲', artist };
+    else {
+        if (song.name) meta.name = song.name;
+        meta.artist = artist;
+    }
 
     prune(store, now);
     if (saveTimer !== null) clearTimeout(saveTimer);
@@ -127,42 +133,30 @@ export const recordPlayStats = (song: SongResult, songKey: string, deltaMs: numb
 
 export const buildPlayStatsPayload = (): PlayStatsPayload => {
     const store = read();
-    const days = Object.entries(store.days).sort(([a], [b]) => a.localeCompare(b));
+    const dayKeys = Object.keys(store.days).sort();
 
     let totalPlays = 0;
     let totalDurationMs = 0;
-    for (const [, bucket] of days) {
-        totalPlays += bucket.p;
-        totalDurationMs += bucket.ms;
+    for (const key of dayKeys) {
+        for (const entry of Object.values(store.days[key])) {
+            totalPlays += entry.p;
+            totalDurationMs += entry.ms;
+        }
     }
-
-    const artists = new Map<string, { artist: string; p: number; ms: number }>();
-    for (const song of Object.values(store.songs)) {
-        const row = artists.get(song.artist) ?? { artist: song.artist, p: 0, ms: 0 };
-        row.p += song.p;
-        row.ms += song.ms;
-        artists.set(song.artist, row);
-    }
-
-    const today = Date.now();
-    const last7Days = Array.from({ length: 7 }, (_, i) => {
-        const date = toLocalDateKey(today - (6 - i) * 24 * 60 * 60 * 1000);
-        const bucket = store.days[date];
-        return { date, p: bucket?.p ?? 0, ms: bucket?.ms ?? 0 };
-    });
+    // A day is in the map only because something was heard on it.
+    const activeDays = dayKeys.length;
 
     return {
+        version: 2,
         generatedAt: new Date().toISOString(),
         summary: {
             totalPlays,
             totalDurationMs,
-            activeDays: days.filter(([, b]) => b.p > 0).length,
-            trackedSince: days[0]?.[0] ?? toLocalDateKey(today),
+            activeDays,
+            trackedSince: dayKeys[0] ?? toLocalDateKey(Date.now()),
         },
-        heatmap: { ...store.days },
-        topSongs: Object.values(store.songs).sort((a, b) => b.p - a.p || b.ms - a.ms).slice(0, 20),
-        topArtists: [...artists.values()].sort((a, b) => b.p - a.p || b.ms - a.ms).slice(0, 20),
-        last7Days,
+        days: store.days,
+        songs: store.songs,
     };
 };
 
