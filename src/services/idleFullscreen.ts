@@ -1,62 +1,80 @@
 // src/services/idleFullscreen.ts
 //
-// [local-only] 只有一条规则：**放歌就是全屏模式，不放歌就是壁纸模式**。
+// 放歌 → 主屏全屏；停歌 → 回到壁纸模式。纯粹由播放状态驱动。
 //
-// 这两个能力应用本来就有：
-//   - 壁纸模式：applyWallpaperMode(true/false)
-//   - 全屏：window.electron.toggleFullscreenWindow()
-// 这里只负责按播放状态在两者之间切换，不再做空闲计时、鼠标阈值那些花样。
+// 关键点：在 Windows 上「退出壁纸模式」会 detach helper 并重建主窗口，所以这个切换
+// 必须整段在主进程里做（见 main.cjs 的 local-only:playback-presentation）。渲染进程只
+// 负责说一句「我现在要全屏」或「我现在要壁纸」，然后它自己会被重建掉 —— 这一点也不影响
+// 主进程把 sequence 走完。
 //
-// 顺序不能反：壁纸模式下的 setFullScreen 会被主进程拒绝（会把窗口撕出桌面层），
-// 所以要进全屏必须先退出壁纸模式；退全屏要先退全屏再回壁纸模式。
+// 渲染进程这边唯一要小心的是：窗口重建后页面会重新加载，此时播放状态还没被 handoff
+// 恢复回来，如果立刻按「暂停」去切壁纸，就会和刚才那次切换打架，表现就是一直闪。
+// 所以启动后先静默 4 秒，只认之后的真实变化。
 
+import { PlayerState } from '../types';
 import { usePlaybackStore } from '../stores/usePlaybackStore';
 import { useDesktopSettingsStore } from '../stores/useDesktopSettingsStore';
-import { PlayerState } from '../types';
 
-/** 退出壁纸模式到能进全屏之间要等一拍，桌面层解挂是异步的。 */
-const SWITCH_DELAY_MS = 400;
+const SETTLE_MS = 4000;
+const DEBOUNCE_MS = 600;
 
-type Bridge = { toggleFullscreenWindow?: () => Promise<unknown> | void };
+type Presentation = 'fullscreen' | 'wallpaper';
 
 export const installIdleFullscreen = (): void => {
-    if (typeof window === 'undefined') return;
-    const bridge = (globalThis as { electron?: Bridge }).electron;
-    if (!bridge?.toggleFullscreenWindow) return;
+    const electron = window.electron;
+    if (!electron || typeof electron.setPlaybackPresentation !== 'function') {
+        return;
+    }
 
-    const isPlaying = (): boolean =>
-        usePlaybackStore.getState().playerState === PlayerState.PLAYING;
+    let lastApplied: Presentation | null = useDesktopSettingsStore.getState().wallpaperMode ? 'wallpaper' : 'fullscreen';
+    let pendingTimer: number | null = null;
+    let inflight = false;
+    let ready = false;
 
-    /** 切换进行中，避免连续的状态变化把两次切换叠在一起。 */
-    let switching = false;
-    let showingFullscreen = false;
+    const wantOf = (state: PlayerState): Presentation => (
+        state === PlayerState.PLAYING ? 'fullscreen' : 'wallpaper'
+    );
 
-    const apply = (): void => {
-        if (switching) return;
-        const playing = isPlaying();
-        if (playing === showingFullscreen) return;
-
-        switching = true;
-        if (playing) {
-            // 放歌：离开壁纸 → 全屏
-            useDesktopSettingsStore.getState().applyWallpaperMode(false);
-            setTimeout(() => {
-                void bridge.toggleFullscreenWindow?.();
-                showingFullscreen = true;
-                switching = false;
-            }, SWITCH_DELAY_MS);
-        } else {
-            // 停歌：退全屏 → 回壁纸
-            void bridge.toggleFullscreenWindow?.();
-            setTimeout(() => {
-                useDesktopSettingsStore.getState().applyWallpaperMode(true);
-                showingFullscreen = false;
-                switching = false;
-            }, SWITCH_DELAY_MS);
+    const apply = async (next: Presentation) => {
+        if (inflight || next === lastApplied) {
+            return;
+        }
+        inflight = true;
+        lastApplied = next;
+        try {
+            await electron.setPlaybackPresentation(next);
+        } catch (error) {
+            console.warn('[idle-fullscreen] switch failed', error);
+            lastApplied = null;
+        } finally {
+            inflight = false;
         }
     };
 
-    // 播放状态一变就切，没有别的条件。
-    usePlaybackStore.subscribe(apply);
-    apply();
+    const evaluate = () => {
+        if (!ready) {
+            return;
+        }
+        const want = wantOf(usePlaybackStore.getState().playerState);
+        if (pendingTimer !== null) {
+            window.clearTimeout(pendingTimer);
+        }
+        pendingTimer = window.setTimeout(() => {
+            pendingTimer = null;
+            // 状态可能在防抖窗口里又变了，重新读一次当前值再决定。
+            void apply(wantOf(usePlaybackStore.getState().playerState));
+        }, DEBOUNCE_MS);
+    };
+
+    window.setTimeout(() => {
+        ready = true;
+        console.log('[idle-fullscreen] ready, playerState =', usePlaybackStore.getState().playerState);
+        void apply(wantOf(usePlaybackStore.getState().playerState));
+        usePlaybackStore.subscribe((state, previous) => {
+            if (state.playerState !== previous.playerState) {
+                console.log('[idle-fullscreen] playerState', previous.playerState, '->', state.playerState);
+                evaluate();
+            }
+        });
+    }, SETTLE_MS);
 };

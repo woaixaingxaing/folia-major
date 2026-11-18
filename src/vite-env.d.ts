@@ -1042,6 +1042,7 @@ declare global {
       minimizeWindow: () => Promise<boolean>;
       toggleMaximizeWindow: () => Promise<boolean>;
       toggleFullscreenWindow: () => Promise<boolean>;
+    setPlaybackPresentation: (mode: 'fullscreen' | 'wallpaper') => Promise<boolean>;
       closeWindow: () => Promise<boolean>;
       quitApp: () => Promise<boolean>;
       isWindowMaximized: () => Promise<boolean>;

@@ -7658,6 +7658,91 @@ ipcMain.handle('window-toggle-maximize', firstParty('window-toggle-maximize', ()
   return true;
 }));
 
+// --- Playback-driven presentation switch ---
+// Leaving wallpaper mode on Windows detaches the helper and REBUILDS the main window, so a
+// renderer that asked for "leave wallpaper, then go fullscreen" would be destroyed halfway
+// through and its second IPC would never land (measured: window stayed at work-area height
+// 1936x1048 while config already said wallpaper_mode=false). Both halves therefore live here,
+// in one awaited sequence, and the renderer only says which presentation it wants.
+let playbackPresentationSerial = 0;
+
+function notifyWallpaperModeChanged() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('wallpaper-mode-changed', getPublicSettings());
+  }
+}
+
+async function waitForMainWindowPainted(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (mainWindow && !mainWindow.isDestroyed()
+      && mainWindow.webContents && !mainWindow.webContents.isLoading()) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return Boolean(mainWindow && !mainWindow.isDestroyed());
+}
+
+async function applyPlaybackPresentation(mode) {
+  // The last request wins: a user who stops playback mid-switch must not be left fullscreen
+  // because an older "fullscreen" sequence resumed afterwards.
+  const serial = ++playbackPresentationSerial;
+
+  if (mode === 'fullscreen') {
+    if (isWallpaperModeEnabled()) {
+      store.set(WALLPAPER_MODE_SETTING_KEY, false);
+      notifyWallpaperModeChanged();
+      await relaunchForWallpaperModeChange(false, null);
+    }
+    if (serial !== playbackPresentationSerial) {
+      return false;
+    }
+    await waitForMainWindowPainted(6000);
+    if (serial !== playbackPresentationSerial) {
+      return false;
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return false;
+    }
+    if (!isMainWindowFullscreen(mainWindow)) {
+      setMainWindowFullscreen(mainWindow, true);
+    }
+    return true;
+  }
+
+  // mode === 'wallpaper'
+  if (mainWindow && !mainWindow.isDestroyed() && isMainWindowFullscreen(mainWindow)) {
+    setMainWindowFullscreen(mainWindow, false);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  if (serial !== playbackPresentationSerial) {
+    return false;
+  }
+  if (!isWallpaperModeEnabled()) {
+    store.set(WALLPAPER_MODE_SETTING_KEY, true);
+    notifyWallpaperModeChanged();
+    await relaunchForWallpaperModeChange(true, null);
+  }
+  return true;
+}
+
+ipcMain.handle('local-only:playback-presentation', async (event, mode) => {
+  if (!isTrustedMainWindowContents(event.sender)) {
+    return false;
+  }
+  if (mode !== 'fullscreen' && mode !== 'wallpaper') {
+    return false;
+  }
+  try {
+    console.log('[presentation] apply', mode);
+    return await applyPlaybackPresentation(mode);
+  } catch (error) {
+    console.error('[presentation] failed', mode, error && error.message);
+    return false;
+  }
+});
+
 ipcMain.handle('window-toggle-fullscreen', (event) => {
   if (!isTrustedMainWindowContents(event.sender) || !mainWindow || mainWindow.isDestroyed()) {
     return false;
