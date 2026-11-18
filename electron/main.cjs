@@ -6885,6 +6885,45 @@ ipcMain.handle('local-only:fullscreen', firstParty('local-only:fullscreen', (eve
     return { ok: true, fullscreen: mainWindow.isFullScreen() };
 }));
 
+// [local-only] 播放时的遮挡层：一个独立的顶层窗口，盖住任务栏。
+// 不能对壁纸窗口 setFullScreen —— 它是 WorkerW 的子窗口，改样式就会脱离桌面层变白。
+let peekWindow = null;
+ipcMain.handle('local-only:peek', firstParty('local-only:peek', (event, on) => {
+    try {
+        if (!on) {
+            if (peekWindow && !peekWindow.isDestroyed()) peekWindow.close();
+            peekWindow = null;
+            return { ok: true, showing: false };
+        }
+        if (peekWindow && !peekWindow.isDestroyed()) {
+            peekWindow.show();
+            return { ok: true, showing: true };
+        }
+        const target = getChosenOrPrimaryWallpaperDisplay();
+        const b = (target && target.bounds) || screen.getPrimaryDisplay().bounds;
+        const entry = mainWindow && !mainWindow.isDestroyed()
+            ? mainWindow.webContents.getURL()
+            : '';
+        peekWindow = new BrowserWindow({
+            x: b.x, y: b.y, width: b.width, height: b.height,
+            frame: false, resizable: false, movable: false,
+            skipTaskbar: true, alwaysOnTop: true, show: false,
+            backgroundColor: '#000000',
+            webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true },
+        });
+        peekWindow.setAlwaysOnTop(true, 'screen-saver');
+        // [local-only] 无边框窗口自带的隐形边框会让内容缩进、底部差几十像素；
+        // 创建完成后按显示器矩形强制覆盖一次。
+        peekWindow.setBounds({ x: b.x, y: b.y, width: b.width, height: b.height });
+        peekWindow.once('ready-to-show', () => peekWindow && peekWindow.show());
+        peekWindow.on('closed', () => { peekWindow = null; });
+        if (entry) void peekWindow.loadURL(entry);
+        return { ok: true, showing: true };
+    } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+}));
+
 ipcMain.handle('play-stats-write', firstParty('play-stats-write', async (event, payload) => {
     const body = `window.__FOLIA_STATS__ = ${JSON.stringify(payload)};\n`;
     const target = path.join(PLAY_STATS_DIR, 'folia-stats.js');

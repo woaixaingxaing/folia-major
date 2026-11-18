@@ -62,6 +62,8 @@ contextBridge.exposeInMainWorld('electron', {
     statsWrite: (payload) => ipcRenderer.invoke('play-stats-write', payload),
     // [local-only] 十秒没操作就全屏，动一下就退出来。
     setFullscreen: (on) => ipcRenderer.invoke('local-only:fullscreen', on),
+    // [local-only] 盖住任务栏：另开一个顶层窗口，不动壁纸窗口。
+    setPeek: (on) => ipcRenderer.invoke('local-only:peek', on),
     statsWriteCover: (assetId, ext, bytes) =>
         ipcRenderer.invoke('play-stats-cover', { assetId, ext, bytes }),
     // Batched by the caller - one message per line would cost more than the logging it records.
