@@ -2884,12 +2884,8 @@ export default function App() {
                 </PlayerBottomBarLayoutContext.Provider>
             </div>
 
-            <StageSessionEmptyState
-                stageSource={stageSource}
-                stageActiveEntryKind={stageActiveEntryKind}
-                nowPlayingConnectionStatus={nowPlayingConnectionStatus}
-                playerCapConnectionStatus={playerCapConnectionStatus}
-            />
+              {/* [local-only] 投屏（stage）的客户端已经从构建里去掉，这个空状态页永远不会有用，
+                  留着只是白白挂一个组件在渲染树里。 */}
 
             <AppOverlays model={appOverlaysModel} />
 
