@@ -31,10 +31,9 @@ export const useLoginWindowStore = create<LoginWindowState>(() => ({ isOpen: fal
  * 打开登录窗口。`pressed` 是按下去的那个东西（按钮、头像），给了窗口就从它那一边出来。`intent` 是打开时要直接
  * 到的地方（例如这个平台的配置清单）。
  */
-export const openLoginWindow = (providerId: OnlineProviderId | null = null, pressed?: Element | null, intent: LoginWindowIntent | null = null): void => {
-    const box = pressed?.getBoundingClientRect();
-    const origin = box && box.width > 0 ? { x: box.left + box.width / 2, y: box.top + box.height / 2, size: Math.min(box.width, box.height), providerId } : null;
-    useLoginWindowStore.setState(state => ({ isOpen: true, providerId, origin, intent, requestId: state.requestId + 1 }));
+export const openLoginWindow = (_providerId: OnlineProviderId | null = null, _pressed?: Element | null, _intent: LoginWindowIntent | null = null): void => {
+    // [local-only] There is no account to sign in to: every entry point is a no-op now.
+    void _providerId; void _pressed; void _intent;
 };
 
 export const closeLoginWindow = (): void => {

@@ -17,17 +17,13 @@ export const BUILTIN_VISUALIZER_MODES = [
     'still',
 ] as const;
 
+// [local-only] Only the plain background survives; the shader backgrounds were removed.
 export const BUILTIN_VISUALIZER_BACKGROUND_MODES = [
     'common',
-    'latent',
-    'monet',
-    'nomand',
-    'sora',
-    'url',
 ] as const;
 
 export const DEFAULT_VISUALIZER_MODE: VisualizerMode = 'still';
-export const DEFAULT_VISUALIZER_BACKGROUND_MODE: VisualizerBackgroundMode = 'latent';
+export const DEFAULT_VISUALIZER_BACKGROUND_MODE: VisualizerBackgroundMode = 'common';
 
 const VISUALIZER_MODE_SET: ReadonlySet<string> = new Set(BUILTIN_VISUALIZER_MODES);
 const VISUALIZER_BACKGROUND_MODE_SET: ReadonlySet<string> = new Set(BUILTIN_VISUALIZER_BACKGROUND_MODES);

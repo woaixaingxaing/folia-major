@@ -1357,8 +1357,10 @@ export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
         console.log(`[LocalMusic] Searching lyrics for: "${searchQuery}"`);
 
         // A selected GridView metadata identity is authoritative and must not be replaced by lyric fallback metadata.
-        if (!hasLocalOrEmbeddedLyrics || onlineFirst) {
-            const shouldUseBestLyric = settingsLyricSettings.autoUseBestLyric;
+          if (!hasLocalOrEmbeddedLyrics || onlineFirst) {
+              // [local-only] autoUseBestLyric defaults to false, so this only runs for a match
+              // the user asked for by hand.
+              const shouldUseBestLyric = settingsLyricSettings.autoUseBestLyric;
             if (shouldUseBestLyric || matchContext.metadataCandidate) {
                 const bestMatch = await autoMatchBestLyric(
                     matchContext.title,

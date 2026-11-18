@@ -157,7 +157,8 @@ export type LyricSettingsState = {
 };
 
 export const useLyricSettingsStore = create<LyricSettingsState>((set, get) => ({
-    autoUseBestLyric: getStoredBoolean('auto_use_best_lyric', true),
+    // [local-only] No lyric is ever looked up online by itself.
+    autoUseBestLyric: getStoredBoolean('auto_use_best_lyric', false),
     preferredAlternativeLyricSource: readStoredPreferredAlternativeLyricSource(),
     keepProviderWordTiming: getStoredBoolean(KEEP_PROVIDER_WORD_TIMING_KEY, true),
     localLyricsPriority: readStoredLocalLyricsPriority(),

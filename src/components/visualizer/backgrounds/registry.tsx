@@ -8,7 +8,9 @@ import type {
 // src/components/visualizer/backgrounds/registry.tsx
 // Discovers shell-level background modes from their local entry modules.
 
-const backgroundEntryModules = import.meta.glob<VisualizerBackgroundEntryModule>('./*/entry.tsx', { eager: true });
+// [local-only] Only the plain "common" background is compiled in: the WebGL ones (latent,
+// monet, nomand, sora) are never discovered, so no shader surface is created.
+const backgroundEntryModules = import.meta.glob<VisualizerBackgroundEntryModule>(['./common/entry.tsx'], { eager: true });
 
 const buildBackgroundRegistry = (modules: Record<string, VisualizerBackgroundEntryModule>) => {
     const entries = Object.entries(modules).map(([path, module]) => {
