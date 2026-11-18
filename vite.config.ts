@@ -219,11 +219,11 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
     },
     build: {
       rollupOptions: {
-        input: {
-          main: 'index.html',
-          stageClient: 'stage-client.html',
-          modExport: 'mod-export.html',
-        },
+          // [local-only] Only the app's own page is built: the stage (casting) client and the
+          // mod export page are gone, so their bundles are never produced.
+          input: {
+            main: 'index.html',
+          },
         output: {
           // Rolldown ignores manualChunks once codeSplitting is set, so every manual split lives here.
           codeSplitting: {
