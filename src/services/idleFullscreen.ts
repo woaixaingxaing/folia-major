@@ -3,6 +3,9 @@
 // [local-only] 桌面上一面墙，看完不该还留着一个窗口边框。手停下来十秒就进全屏，鼠标一动就退出来。
 // 判断"有没有操作"只看真实的输入事件：鼠标移动、按下、滚轮、键盘、触摸。
 
+import { usePlaybackStore } from '../stores/usePlaybackStore';
+import { PlayerState } from '../types';
+
 const IDLE_MS = 10_000;
 /** 鼠标只有停在原地时的细碎抖动不算操作，超过这个距离才算。 */
 const MOVE_THRESHOLD_PX = 4;
@@ -19,8 +22,11 @@ export const installIdleFullscreen = (): void => {
     let lastX: number | null = null;
     let lastY: number | null = null;
 
+    // [local-only] 只在放歌的时候进全屏：空着桌面不该突然盖住任务栏。
+    const isPlaying = (): boolean => usePlaybackStore.getState().playerState === PlayerState.PLAYING;
+
     const enter = (): void => {
-        if (fullscreen) return;
+        if (fullscreen || !isPlaying()) return;
         fullscreen = true;
         void bridge.setFullscreen?.(true);
     };
