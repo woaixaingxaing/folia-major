@@ -6421,8 +6421,28 @@ async function setMainWindowTransparentModeFromRemote(enabled) {
         }
         callback({});
     });
+    // [local-only] The window sits on the desktop, where a stray click lands on it. This key is
+    // the deliberate way in: three modifiers and F, so nothing hits it by accident.
+    try {
+        const ACCELERATOR = 'Control+Alt+Shift+F';
+        const ok = globalShortcut.register(ACCELERATOR, () => {
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.show();
+            // A wallpaper window lives under the desktop icons: raising it to the top for a moment
+            // is what actually brings it forward.
+            mainWindow.setAlwaysOnTop(true);
+            mainWindow.focus();
+            mainWindow.setAlwaysOnTop(false);
+            console.log('[local-only] hotkey focused the window:', ACCELERATOR);
+        });
+        console.log('[local-only] hotkey', ACCELERATOR, ok ? 'registered' : 'REFUSED (already taken)');
+    } catch (error) {
+        console.warn('[local-only] hotkey registration failed', error);
+    }
+
     applyTileMemoryBudget(app, screen);
-  const startupResult = await mainProcessStartupPromise;
+    const startupResult = await mainProcessStartupPromise;
   if (startupResult === 'duplicate') {
     app.quit();
     return;
