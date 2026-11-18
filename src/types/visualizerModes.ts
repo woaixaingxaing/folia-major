@@ -12,25 +12,9 @@ import type { VisualizerBackgroundMode, VisualizerMode } from '../types';
 // 对不上就抛错（assertBuiltinVisualizerModes）。漏加一个模式会当场炸，不会像旧文档那样
 // 悄悄少两个。
 
+// [local-only] Every animated lyric style was removed. "still" is plain DOM text, no canvas.
 export const BUILTIN_VISUALIZER_MODES = [
-    'cadenza',
-    'cappella',
-    'claddagh',
-    'classic',
-    'diorama',
-    'nebbia',
-    'fume',
-    'hanabi',
-    'lumiere',
-    'machi',
-    'metaphor',
-    'monet',
-    'partita',
-    'pendolo',
-    'sonnet',
     'still',
-    'tempera',
-    'tilt',
 ] as const;
 
 export const BUILTIN_VISUALIZER_BACKGROUND_MODES = [
@@ -42,7 +26,7 @@ export const BUILTIN_VISUALIZER_BACKGROUND_MODES = [
     'url',
 ] as const;
 
-export const DEFAULT_VISUALIZER_MODE: VisualizerMode = 'classic';
+export const DEFAULT_VISUALIZER_MODE: VisualizerMode = 'still';
 export const DEFAULT_VISUALIZER_BACKGROUND_MODE: VisualizerBackgroundMode = 'latent';
 
 const VISUALIZER_MODE_SET: ReadonlySet<string> = new Set(BUILTIN_VISUALIZER_MODES);

@@ -12,7 +12,9 @@ export type {
 } from './definition';
 
 // Central mode registry. Entries are discovered from each visualizer's local entry file.
-const visualizerEntryModules = import.meta.glob<VisualizerEntryModule>('./*/entry.tsx', { eager: true });
+// [local-only] Only the plain-text "still" style is compiled into the registry. The animated
+// styles stay on disk but are never discovered, so no WebGL/Pixi surface can be mounted.
+const visualizerEntryModules = import.meta.glob<VisualizerEntryModule>(['./still/entry.tsx'], { eager: true });
 
 const buildVisualizerRegistry = (modules: Record<string, VisualizerEntryModule>) => {
     const entries = Object.entries(modules).map(([path, module]) => {

@@ -17,7 +17,6 @@ import PlayerPanel from './components/app/PlayerPanel';
 import ThemeQuickEditorHost from './components/panelTab/ThemeQuickEditor';
 import AppDialogs from './components/app/dialogs/AppDialogs';
 import { useProviderSignOut } from './components/app/dialogs/useProviderSignOut';
-import LoginHost from './components/login/LoginHost';
 import { useSettingsDialogModel } from './components/app/dialogs/useSettingsDialogModel';
 import AppOverlays from './components/app/overlays/AppOverlays';
 import PonderHost from './components/ponder/PonderHost';
@@ -2982,7 +2981,6 @@ export default function App() {
 
             <AppDialogs model={appDialogsModel} />
             {/* 登录窗口挂在最外层：每个资料库界面（网格、Bravais、文本）都用 openLoginWindow 打开同一个窗口。 */}
-            <LoginHost account={accountController} />
             {signOutDialog}
             <ReleaseNotesDialog
                 isOpen={startupExperience.isReleaseNotesOpen}
