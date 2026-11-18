@@ -1,4 +1,6 @@
 import { Buffer } from 'buffer';
+// [local-only] Installed before anything else so no module can reach the network at import time.
+import { installOfflineGuard } from './services/offlineGuard';
 import { installGlobalVisualizerFrameRateLimiter } from './utils/frameRateLimiter';
 import { installConsoleLogCapture } from './utils/consoleLogBuffer';
 import { installDebugModule } from './services/debug/debugModule';
@@ -7,6 +9,8 @@ import { isPerfCheckSurface } from './utils/appSurface';
 // import { installCoverSizeAudit } from './services/debug/coverSizeSamples';
 // @ts-ignore
 globalThis.Buffer = Buffer;
+// [local-only] fetch / XHR / WebSocket / EventSource / sendBeacon are replaced with ones that fail.
+installOfflineGuard();
 // First, so the debug overlay's console tab has the startup lines too - they are where a failure
 // to reach a library or restore a session shows up.
 installConsoleLogCapture();

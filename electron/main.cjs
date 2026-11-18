@@ -6409,8 +6409,19 @@ async function setMainWindowTransparentModeFromRemote(enabled) {
   return setMainWindowTransparentMode(enabled, handoff);
 }
 
-app.whenReady().then(async () => {
-  applyTileMemoryBudget(app, screen);
+  app.whenReady().then(async () => {
+    // [local-only] Nothing this app asks for may leave the machine. The renderer already replaces
+    // fetch/XHR/WebSocket; this is the second gate, for requests made from the main process or by
+    // a worker it hosts. file:, data:, blob: and the app's own protocols are untouched.
+    session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+        if (/^https?:/i.test(details.url)) {
+            console.warn('[local-only] blocked request', details.url);
+            callback({ cancel: true });
+            return;
+        }
+        callback({});
+    });
+    applyTileMemoryBudget(app, screen);
   const startupResult = await mainProcessStartupPromise;
   if (startupResult === 'duplicate') {
     app.quit();
