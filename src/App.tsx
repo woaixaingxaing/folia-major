@@ -715,7 +715,9 @@ export default function App() {
     // Navigation and Library Hooks
     // manages current view, selected items, and navigation functions across the app
     const {
-        currentView,
+        // [local-only] 播放器那一页已经不挂载了，导航仍然会往那儿切；把视图钉在海报墙上，
+        // 免得误触后看到一片空白。下面的 history 相关逻辑照旧跑，只是显示永远在墙上。
+        currentView: _navigationView,
         focusedPlaylistIndex,
         setFocusedPlaylistIndex,
         navidromeFocusedAlbumIndex,
@@ -737,6 +739,9 @@ export default function App() {
         popCollectionTo,
         backCollection,
     } = useAppNavigation();
+
+    // [local-only] 显示永远停在海报墙：播放器那一页已经不挂载了。
+    const currentView = (_navigationView === 'player' ? 'lattice' : _navigationView) as typeof _navigationView;
     const reduceLatticeMotion = useReducedMotionFor('lattice');
     const visualizerAroundWall = useVisualizerAroundWall();
 
