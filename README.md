@@ -1,3 +1,20 @@
+> ## 这是个人分支，不是上游版本
+>
+> fork 自 [chthollyphile/folia-major](https://github.com/chthollyphile/folia-major)，按个人需要改造成了**纯本地播放器**。和上游的区别：
+>
+> - **移除全部在线音乐平台**（网易云 / QQ / 酷狗 / 汽水 / YouTube 等）与账号登录入口
+> - **不发起任何网络请求**：渲染层把 fetch / XHR / WebSocket 换成直接失败，主进程用 `session.webRequest` 取消所有 http(s)
+> - **只保留海报墙一种界面**，壁纸模式常驻，没有设置页、播放队列页和返回导航
+> - **封面只用音频文件内嵌的那张**，不做在线匹配；删歌重扫也不会把封面认错
+> - **新增本地听歌统计**：按天、按小时、按歌记录，导出成 `folia-stats.js` 给本地网页画热力图与榜单
+> - 启动入口是一个全局快捷键，避免在桌面上误点
+>
+> 许可证沿用上游的 **AGPL-3.0**（见 `LICENSE`）。本分支对源码的修改都在提交历史里逐条标注，标注前缀为 `local-only build:`。
+>
+> 下面保留上游的完整说明，其中在线功能的部分在本分支**不可用**。
+
+---
+
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b5d0e863-48be-497b-b0e9-4bd8d8ce9bf0" alt="Folia" width="100%" />
 </p>

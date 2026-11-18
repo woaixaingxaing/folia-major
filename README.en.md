@@ -1,3 +1,20 @@
+> ## This is a personal fork, not upstream
+>
+> Forked from [chthollyphile/folia-major](https://github.com/chthollyphile/folia-major) and turned into a **local-only player**:
+>
+> - every online music provider and the account sign-in are gone
+> - **no network request is made**: the renderer replaces fetch / XHR / WebSocket with ones that fail, and the main process cancels every http(s) request
+> - **only the poster wall remains**, always in wallpaper mode, with no settings page, queue page or back navigation
+> - covers come **only from the file's embedded art**, never from a lookup
+> - adds **local listening statistics** (per day, per hour, per song) exported as `folia-stats.js` for a heatmap page
+> - a global hotkey is the deliberate way to bring the window forward
+>
+> Licensed under the upstream **AGPL-3.0** (see `LICENSE`). Changes are marked in the commit history with the `local-only build:` prefix.
+>
+> The upstream documentation below still describes online features that **do not work here**.
+
+---
+
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b5d0e863-48be-497b-b0e9-4bd8d8ce9bf0" alt="Folia" width="100%" />
 </p>
