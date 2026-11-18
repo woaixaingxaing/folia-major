@@ -60,6 +60,8 @@ contextBridge.exposeInMainWorld('electron', {
     debugOpenLogs: (which) => ipcRenderer.invoke('debug-open-logs', which),
     // [local-only] Writes the listening statistics the heatmap page reads from disk.
     statsWrite: (payload) => ipcRenderer.invoke('play-stats-write', payload),
+    statsWriteCover: (assetId, ext, bytes) =>
+        ipcRenderer.invoke('play-stats-cover', { assetId, ext, bytes }),
     // Batched by the caller - one message per line would cost more than the logging it records.
     debugWriteRuntimeLines: (lines) => ipcRenderer.send('debug-runtime-lines', lines),
     // The main process's console lines, for the log panel: what was said so far, then each burst.

@@ -6872,6 +6872,26 @@ ipcMain.handle('play-stats-write', firstParty('play-stats-write', (event, payloa
     }
 }));
 
+// [local-only] One cover, copied out once. The page loads it as a file next to itself, so the app
+// does not have to be running for the artwork to show.
+ipcMain.handle('play-stats-cover', firstParty('play-stats-cover', (event, request) => {
+    try {
+        const assetId = String(request && request.assetId || '');
+        const ext = String(request && request.ext || 'jpg').replace(/[^a-z0-9]/gi, '') || 'jpg';
+        if (!assetId || !request || !request.bytes) return { ok: false, error: 'empty cover' };
+        const dir = path.join(PLAY_STATS_DIR, 'covers');
+        fs.mkdirSync(dir, { recursive: true });
+        const safe = assetId.replace(/[^A-Za-z0-9._-]/g, '_');
+        const target = path.join(dir, `${safe}.${ext}`);
+        if (!fs.existsSync(target)) {
+            fs.writeFileSync(target, Buffer.from(request.bytes));
+        }
+        return { ok: true };
+    } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+}));
+
 ipcMain.handle('get-settings', firstParty('get-settings', () => {
   return getPublicSettings();
 }));
