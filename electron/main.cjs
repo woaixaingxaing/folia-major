@@ -6908,6 +6908,8 @@ ipcMain.handle('local-only:peek', firstParty('local-only:peek', (event, on) => {
             x: b.x, y: b.y, width: b.width, height: b.height,
             frame: false, resizable: false, movable: false,
             skipTaskbar: true, alwaysOnTop: true, show: false,
+            // 不抢焦点：抢了焦点主窗口就收不到键盘，ESC 退不出来。
+            focusable: false, acceptFirstMouse: true,
             backgroundColor: '#000000',
             webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true },
         });

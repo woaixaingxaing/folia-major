@@ -51,6 +51,10 @@ export const installIdleFullscreen = (): void => {
     window.addEventListener('pointerdown', wake, { passive: true });
     window.addEventListener('wheel', wake, { passive: true });
     window.addEventListener('keydown', wake, { passive: true });
+    // ESC 先收起遮挡，再交给应用自己处理。
+    window.addEventListener('keydown', event => {
+        if (event.key === 'Escape') hide();
+    }, { passive: true });
     window.addEventListener('touchstart', wake, { passive: true });
     window.addEventListener('pointermove', event => {
         const moved = lastX === null || lastY === null
