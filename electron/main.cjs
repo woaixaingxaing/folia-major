@@ -6859,13 +6859,21 @@ ipcMain.handle('report-device-pixel-ratio', (event, ratio) => {
 // [local-only] Where the listening statistics land, for the heatmap page to include. A .js file
 // rather than .json: a page opened from disk can load a script, but fetching a .json is refused.
 const PLAY_STATS_DIR = path.join('F:\\', '\u56FE\u7247', 'notes-app');
-ipcMain.handle('play-stats-write', firstParty('play-stats-write', (event, payload) => {
+ipcMain.handle('play-stats-write', firstParty('play-stats-write', async (event, payload) => {
+    const body = `window.__FOLIA_STATS__ = ${JSON.stringify(payload)};\n`;
+    const target = path.join(PLAY_STATS_DIR, 'folia-stats.js');
+    const tmp = `${target}.tmp`;
     try {
-        fs.mkdirSync(PLAY_STATS_DIR, { recursive: true });
-        const target = path.join(PLAY_STATS_DIR, 'folia-stats.js');
-        const tmp = `${target}.tmp`;
-        fs.writeFileSync(tmp, `window.__FOLIA_STATS__ = ${JSON.stringify(payload)};\n`, 'utf8');
-        fs.renameSync(tmp, target);
+        await fs.promises.mkdir(PLAY_STATS_DIR, { recursive: true });
+        await fs.promises.writeFile(tmp, body, 'utf8');
+        try {
+            await fs.promises.rename(tmp, target);
+        } catch {
+            // A reader (the page, or a scanner) can hold the target for a moment: write it in
+            // place instead and drop the temporary file.
+            await fs.promises.writeFile(target, body, 'utf8');
+            await fs.promises.unlink(tmp).catch(() => {});
+        }
         return { ok: true };
     } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -6874,17 +6882,24 @@ ipcMain.handle('play-stats-write', firstParty('play-stats-write', (event, payloa
 
 // [local-only] One cover, copied out once. The page loads it as a file next to itself, so the app
 // does not have to be running for the artwork to show.
-ipcMain.handle('play-stats-cover', firstParty('play-stats-cover', (event, request) => {
+ipcMain.handle('play-stats-cover', firstParty('play-stats-cover', async (event, request) => {
     try {
         const assetId = String(request && request.assetId || '');
         const ext = String(request && request.ext || 'jpg').replace(/[^a-z0-9]/gi, '') || 'jpg';
         if (!assetId || !request || !request.bytes) return { ok: false, error: 'empty cover' };
         const dir = path.join(PLAY_STATS_DIR, 'covers');
-        fs.mkdirSync(dir, { recursive: true });
+        await fs.promises.mkdir(dir, { recursive: true });
         const safe = assetId.replace(/[^A-Za-z0-9._-]/g, '_');
         const target = path.join(dir, `${safe}.${ext}`);
-        if (!fs.existsSync(target)) {
-            fs.writeFileSync(target, Buffer.from(request.bytes));
+        try {
+            await fs.promises.access(target);
+        } catch {
+            // Straight from the received bytes: no copy through an intermediate Buffer.
+            const bytes = request.bytes;
+            const view = Buffer.isBuffer(bytes)
+                ? bytes
+                : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            await fs.promises.writeFile(target, view);
         }
         return { ok: true };
     } catch (error) {

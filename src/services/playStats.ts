@@ -76,6 +76,8 @@ let cache: PlayStatsStore | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let exportTimer: ReturnType<typeof setTimeout> | null = null;
 let coversBusy = false;
+/** Covers already copied this run, by asset id: an album's songs share one. */
+const copiedCovers = new Map<string, string>();
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -123,11 +125,13 @@ const prune = (store: PlayStatsStore, now: number): void => {
 };
 
 /**
- * Adds one stretch of listening. `countsAsPlay` is true only for the first report of a song, so a
- * song left playing keeps adding time without being counted again.
+ * Adds one stretch of listening. `addPlays` is how many plays that stretch contains: 1 when the
+ * song starts, 1 more for each further full listen (a song left on repeat), else 0.
  */
-export const recordPlayStats = (song: SongResult, songKey: string, deltaMs: number, countsAsPlay: boolean): void => {
-    if (!Number.isFinite(deltaMs) || deltaMs <= 0 || !songKey) return;
+export const recordPlayStats = (song: SongResult, songKey: string, deltaMs: number, addPlays: number): void => {
+    if (!songKey || addPlays < 0) return;
+    if ((!Number.isFinite(deltaMs) || deltaMs <= 0) && addPlays === 0) return;
+    const plays = Math.max(0, Math.round(addPlays));
     const store = read();
     const now = Date.now();
     const dayKey = toLocalDateKey(now);
@@ -135,11 +139,11 @@ export const recordPlayStats = (song: SongResult, songKey: string, deltaMs: numb
 
     const day = store.days[dayKey] ?? (store.days[dayKey] = {});
     const entry = day[songKey] ?? (day[songKey] = { p: 0, ms: 0 });
-    entry.ms += Math.round(deltaMs);
-    if (countsAsPlay) {
-        entry.p += 1;
+    if (deltaMs > 0) entry.ms += Math.round(deltaMs);
+    if (plays > 0) {
+        entry.p += plays;
         const hours = store.hours[dayKey] ?? (store.hours[dayKey] = {});
-        hours[hourKey] = (hours[hourKey] ?? 0) + 1;
+        hours[hourKey] = (hours[hourKey] ?? 0) + plays;
     }
 
     // The name is kept beside the play so a file deleted later still reads as itself, not "未知歌曲".
@@ -194,6 +198,9 @@ const exportMissingCovers = async (store: PlayStatsStore): Promise<void> => {
             if (meta.cover !== undefined) continue;
             const assetId = meta.coverAssetId;
             if (!assetId) { meta.cover = ''; continue; }
+            // An album's songs share one cover: copy it once, then point the rest at the same file.
+            const copied = copiedCovers.get(assetId);
+            if (copied !== undefined) { meta.cover = copied; continue; }
             const blob = await readCoverAsset(assetId);
             if (!blob) { meta.cover = ''; continue; }
             const ext = EXTENSIONS[blob.type] || 'jpg';
@@ -201,6 +208,7 @@ const exportMissingCovers = async (store: PlayStatsStore): Promise<void> => {
             const written = await bridge.statsWriteCover(assetId, ext, bytes) as { ok?: boolean } | undefined;
             if (written && written.ok === false) break;
             meta.cover = `covers/${safeName(assetId)}.${ext}`;
+            copiedCovers.set(assetId, meta.cover);
             budget -= 1;
         }
     } catch {
@@ -257,11 +265,18 @@ const scheduleExport = (): void => {
     exportTimer = setTimeout(() => { exportTimer = null; writeExport(); }, EXPORT_DELAY_MS);
 };
 
-/** Writes the export now: called when the window is going away, where a debounce would not run. */
+/**
+ * Writes the export now: called when the window is going away, where a debounce would not run.
+ * The payload goes first: copying covers means awaiting IndexedDB reads, and the window may be
+ * gone before any of that finishes. The covers are picked up again on the next export.
+ */
 export const flushPlayStats = (): void => {
     if (exportTimer !== null) clearTimeout(exportTimer);
     exportTimer = null;
-    writeExport();
+    const bridge = api();
+    if (!bridge?.statsWrite) return;
+    save(read());
+    void bridge.statsWrite(buildPlayStatsPayload()).catch(() => { /* nothing to do while closing */ });
 };
 
 export const installPlayStatsFlush = (): void => {

@@ -39,7 +39,14 @@ type UseRecentPlaysRecorderParams = {
  * in seconds, as `dueAt` asks for the next report; both are handed how many reports were made
  * before. Paused time and seeks add nothing. Returns what stops the following.
  */
-export const whenHeard = (audio: ObservedMedia, dueAt: (reports: number) => number, onHeard: (reports: number, heard: number) => void): (() => void) => {
+export const whenHeard = (
+    audio: ObservedMedia,
+    dueAt: (reports: number) => number,
+    onHeard: (reports: number, heard: number) => void,
+    /** Handed what has sounded when playback stops short of the next report: a paused or ended
+     * song would otherwise lose everything since its last one. */
+    onTail?: (heard: number) => void,
+): (() => void) => {
     let heard = 0;
     let reports = 0;
     let last = audio.currentTime || 0;
@@ -53,8 +60,19 @@ export const whenHeard = (audio: ObservedMedia, dueAt: (reports: number) => numb
         reports += 1;
         onHeard(reports - 1, heard);
     }
+    function handleTail() {
+        if (onTail) onTail(heard);
+    }
     audio.addEventListener('timeupdate', handleTimeUpdate);
-    return () => audio.removeEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('pause', handleTail);
+    audio.addEventListener('ended', handleTail);
+    return () => {
+        audio.removeEventListener('timeupdate', handleTimeUpdate);
+        audio.removeEventListener('pause', handleTail);
+        audio.removeEventListener('ended', handleTail);
+        // Left for another song: what sounded since the last report still counts.
+        handleTail();
+    };
 };
 
 // The length of the song in seconds: that of what is sounding where the element knows it, else
@@ -88,22 +106,36 @@ export const useRecentPlaysRecorder = ({ audioRef, currentSong, activeDeck }: Us
             return Math.min(length * LISTENING_SHARE, LISTENING_SECONDS_AT_MOST) + (reports - 1) * length;
         };
           // [local-only] What the heatmap page reads: how much was heard, and on what day.
+          // `myself` is the song this run of the effect belongs to: on a song change `song.current`
+          // already points at the next one, and a pause that lands in that gap would book the time
+          // to the wrong song.
+          const myself = currentSong;
           let reportedMs = 0;
+          const recordHeard = (sounded: number, addPlays: number): void => {
+              const live = song.current;
+              const playing = live && songKey !== null && getPlaybackSongKey(live) === songKey ? live : myself;
+              const playingSource = playing ? getPlaybackSourceRef(playing) : null;
+              if (!playing || !playingSource || playingSource.kind === 'stage') return;
+              const soundedMs = Math.round(sounded * 1000);
+              const deltaMs = soundedMs - reportedMs;
+              if (deltaMs <= 0 && addPlays === 0) return;
+              recordPlayStats(playing, songKey ?? getPlaybackSongKey(playing), deltaMs, addPlays);
+              reportedMs = soundedMs;
+          };
           return whenHeard(audio, dueAt, (reports, sounded) => {
               const heard = song.current;
               const source = heard ? getPlaybackSourceRef(heard) : null;
               if (!heard || !source || source.kind === 'stage') return;
-              const soundedMs = Math.round(sounded * 1000);
-              recordPlayStats(heard, songKey ?? getPlaybackSongKey(heard), soundedMs - reportedMs, reports === 0);
-              reportedMs = soundedMs;
+              // 第 1 次上报是「开始播」，第 2 次是这首歌听了一半，第 3 次起每多听一首的长度就是又一遍。
+              recordHeard(sounded, reports === 0 || reports >= 2 ? 1 : 0);
             // The account at that moment: a listener can sign out or in during the song. A Navidrome
             // song's is the user at its server; a local file has none.
             const accountId = source.kind === 'online'
                 ? String(useOnlineProviderAccountStore.getState().accounts[source.providerId]?.user?.id ?? '')
                 : source.kind === 'navidrome' ? navidromePlayAccount(getNavidromeConfig()) : '';
-            if (reports === 0) noteSongPlayed(heard, accountId);
-            else noteSongListened(heard, accountId, lengthOf(audio, heard) * 1000, reports > 1);
-        });
+              if (reports === 0) noteSongPlayed(heard, accountId);
+              else noteSongListened(heard, accountId, lengthOf(audio, heard) * 1000, reports > 1);
+          }, sounded => recordHeard(sounded, 0));
         // `activeDeck`: `audioRef` names another element after an automix swap; `playbackRoute`: the
         // HiFi media shim stands in for the deck.
     }, [audioRef, activeDeck, playbackRoute, songKey]);
