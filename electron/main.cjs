@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, session, screen, dialog, shell, nativeImage, webContents: electronWebContents, Menu, Tray, nativeTheme, powerSaveBlocker, safeStorage, protocol, crashReporter, net: electronNet } = require('electron');
+﻿const { app, powerMonitor, BrowserWindow, globalShortcut, ipcMain, session, screen, dialog, shell, nativeImage, webContents: electronWebContents, Menu, Tray, nativeTheme, powerSaveBlocker, safeStorage, protocol, crashReporter, net: electronNet } = require('electron');
 // 必须先于其它模块加载：TEMP / TMP 里没展开的 %USERPROFILE% 会让 os.tmpdir() 变成相对路径（#690）。
 for (const repair of require('./tempDirEnvironment.cjs').repairTempDirEnvironment()) {
   console.warn(`[TempDir] expanded ${repair.key}: ${repair.from} -> ${repair.to}`);
@@ -6042,6 +6042,8 @@ function createWindow(options = {}) {
         preload: path.join(__dirname, 'preload.cjs'),
         nodeIntegration: false,
         contextIsolation: true,
+        spellcheck: false,
+    enableWebSQL: false,
         webSecurity: true, // Disable for local app
         backgroundThrottling: false
       }
@@ -6059,6 +6061,19 @@ function createWindow(options = {}) {
   win.__wallpaperGeometry = useWallpaperGeometry;
   win.__transparentFullscreen = false;
 
+  // Gemini 的 A 方案：进出全屏时把置顶清掉并抢一次前台。
+  // Windows 10 只有「前台窗口是一块规规矩矩的全屏无边框窗口」时才由 DWM 压住任务栏；
+  // 残留的 TOPMOST 或没拿到前台都会破坏这个判定，鼠标扫到底边任务栏就浮上来。
+  win.on('enter-full-screen', () => {
+    if (win.isDestroyed()) return;
+    win.setAlwaysOnTop(false);
+    win.focus();
+  });
+  win.on('leave-full-screen', () => {
+    if (win.isDestroyed()) return;
+    win.setAlwaysOnTop(false);
+  });
+
   if (process.platform === 'win32' && useTransparentWindow) {
     win.webContents.on('before-input-event', (event, input) => {
       if (input.type !== 'keyDown' || input.key !== 'F11' || input.isAutoRepeat) {
@@ -6070,6 +6085,20 @@ function createWindow(options = {}) {
       }
     });
   }
+
+  // ESC 在这个改版里只有一个含义：正在全屏时退出全屏，让任务栏重新露出来。
+  // 这个软件只有海报墙一页，没有“返回上一页”，所以 Escape 在这里被吃掉，不再往后传，
+  // 也就不会被墙面的键盘层当成返回。放在主进程而不是渲染层：渲染层要异步问一次
+  // isWindowFullscreen() 才知道该不该拦，await 之后事件早已派发完（Gemini 指出的问题）。
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.key !== 'Escape' || input.isAutoRepeat) {
+      return;
+    }
+    if (win.isFullScreen()) {
+      event.preventDefault();
+      setMainWindowFullscreen(win, false);
+    }
+  });
 
   if (useDesktopWindowType) {
     x11WallpaperWindows.add(win);
@@ -6409,7 +6438,27 @@ async function setMainWindowTransparentModeFromRemote(enabled) {
   return setMainWindowTransparentMode(enabled, handoff);
 }
 
-  app.whenReady().then(async () => {
+  // Gemini 定案第 1 步：压制 V8 堆上限与 GPU shader 缓存（省渲染/GPU 进程常驻内存）
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=192 --expose-gc');
+app.commandLine.appendSwitch('gpu-program-cache-size-kb', '16384');
+
+app.whenReady().then(async () => {
+    // 壁纸窗口平时拿不到键盘焦点，页面里监听的 / 和 Ctrl+F 收不到，所以搜索必须有一个
+    // 全局快捷键：Ctrl+Alt+F。按下去先解挂 WorkerW 拿真焦点，再让渲染层弹出搜索框。
+    try {
+      globalShortcut.register('Control+Alt+F', () => {
+        void (async () => {
+          await enterSearchMode();
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('local-only:open-search');
+          }
+        })();
+      });
+    } catch (error) {
+      console.warn('[search] global shortcut failed', error && error.message);
+    }
+
+    startDesktopModeWatch();
     // [local-only] Nothing this app asks for may leave the machine. The renderer already replaces
     // fetch/XHR/WebSocket; this is the second gate, for requests made from the main process or by
     // a worker it hosts. file:, data:, blob: and the app's own protocols are untouched.
@@ -6552,6 +6601,12 @@ async function setMainWindowTransparentModeFromRemote(enabled) {
   }
   createWindow();
   focusMainWindow();
+  // 启动兜底：窗口创建后必须真的显示出来。之前把「播放→全屏」链路去掉后，
+  // show() 只在那条链路里被调用，结果非壁纸模式启动时窗口一直是隐藏的（vis=False）。
+  if (mainWindow && !mainWindow.isDestroyed() && !isWindowsWallpaperMode()) {
+    mainWindow.show();
+  }
+
   if (process.env.FOLIA_PENDING_DESKTOP_LYRIC === '1') {
     delete process.env.FOLIA_PENDING_DESKTOP_LYRIC;
     if (!isWallpaperModeEnabled()) {
@@ -7685,45 +7740,9 @@ async function waitForMainWindowPainted(timeoutMs) {
 }
 
 async function applyPlaybackPresentation(mode) {
-  // The last request wins: a user who stops playback mid-switch must not be left fullscreen
-  // because an older "fullscreen" sequence resumed afterwards.
-  const serial = ++playbackPresentationSerial;
-
-  if (mode === 'fullscreen') {
-    if (isWallpaperModeEnabled()) {
-      store.set(WALLPAPER_MODE_SETTING_KEY, false);
-      notifyWallpaperModeChanged();
-      await relaunchForWallpaperModeChange(false, null);
-    }
-    if (serial !== playbackPresentationSerial) {
-      return false;
-    }
-    await waitForMainWindowPainted(6000);
-    if (serial !== playbackPresentationSerial) {
-      return false;
-    }
-    if (!mainWindow || mainWindow.isDestroyed()) {
-      return false;
-    }
-    if (!isMainWindowFullscreen(mainWindow)) {
-      setMainWindowFullscreen(mainWindow, true);
-    }
-    return true;
-  }
-
-  // mode === 'wallpaper'
-  if (mainWindow && !mainWindow.isDestroyed() && isMainWindowFullscreen(mainWindow)) {
-    setMainWindowFullscreen(mainWindow, false);
-    await new Promise((resolve) => setTimeout(resolve, 350));
-  }
-  if (serial !== playbackPresentationSerial) {
-    return false;
-  }
-  if (!isWallpaperModeEnabled()) {
-    store.set(WALLPAPER_MODE_SETTING_KEY, true);
-    notifyWallpaperModeChanged();
-    await relaunchForWallpaperModeChange(true, null);
-  }
+  // [桌面模式] 不再切全屏、不再重建窗口：窗口永远留在 WorkerW 壁纸层。
+  // 播放/停播只影响 Windows 任务栏的自动隐藏（由 desktop-mode-watch 负责）。
+  playbackIsPlaying = mode === 'fullscreen';
   return true;
 }
 

@@ -281,3 +281,82 @@
 .lattice-poster-badge.is-index {
     display: none !important;
 }
+/* 右下角只剩「定位正在播放」一个按钮（工具面板与回首页都拿掉了）。 */
+.lattice-locate-only {
+    position: absolute;
+    right: 24px;
+    bottom: 24px;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
+}
+
+/* 搜索：浮在墙上方的一条胶囊。放在 .lattice-field 之外，墙面平移/缩放时它不动。 */
+.lattice-search {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    opacity: 1;
+    pointer-events: auto;
+}
+.lattice-search-input {
+    width: 760px;
+    height: 76px;
+    padding: 0 34px;
+    border-radius: 38px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(0, 0, 0, 0.55);
+    color: #f5f5f5;
+    font-size: 30px;
+    outline: none;
+    backdrop-filter: blur(18px);
+}
+.lattice-search-input::placeholder { color: rgba(255, 255, 255, 0.42); }
+.lattice-search-input:focus {
+    border-color: rgba(255, 255, 255, 0.42);
+    background: rgba(0, 0, 0, 0.72);
+}
+.lattice-search-go {
+    height: 76px;
+    padding: 0 34px;
+    border-radius: 38px;
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    background: rgba(255, 255, 255, 0.14);
+    color: #f5f5f5;
+    font-size: 26px;
+    cursor: pointer;
+    backdrop-filter: blur(18px);
+}
+.lattice-search-go:hover { background: rgba(255, 255, 255, 0.24); }
+.lattice-search-clear {
+    width: 46px;
+    height: 46px;
+    border: 0;
+    border-radius: 23px;
+    background: rgba(255, 255, 255, 0.16);
+    color: #fff;
+    font-size: 26px;
+    line-height: 1;
+    cursor: pointer;
+}
+.lattice-search-key { font-size: 10px; color: rgba(255, 255, 255, 0.4); }
+
+.lattice-search-go {
+    height: 34px;
+    padding: 0 14px;
+    border-radius: 17px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.12);
+    color: #f1f1f1;
+    font-size: 13px;
+    cursor: pointer;
+    backdrop-filter: blur(10px);
+}
+.lattice-search-go:hover { background: rgba(255, 255, 255, 0.2); }

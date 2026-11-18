@@ -232,6 +232,14 @@ contextBridge.exposeInMainWorld('electron', {
     toggleMaximizeWindow: () => ipcRenderer.invoke('window-toggle-maximize'),
     toggleFullscreenWindow: () => ipcRenderer.invoke('window-toggle-fullscreen'),
   setPlaybackPresentation: (mode) => ipcRenderer.invoke('local-only:playback-presentation', mode),
+  reportPlaybackState: (playing) => ipcRenderer.send('local-only:playback-state', playing),
+  onOpenSearch: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('local-only:open-search', listener);
+    return () => ipcRenderer.removeListener('local-only:open-search', listener);
+  },
+  enterSearchMode: () => ipcRenderer.invoke('local-only:enter-search'),
+  exitSearchMode: () => ipcRenderer.invoke('local-only:exit-search'),
     closeWindow: () => ipcRenderer.invoke('window-close'),
     quitApp: () => ipcRenderer.invoke('app-quit'),
     isWindowMaximized: () => ipcRenderer.invoke('window-is-maximized'),

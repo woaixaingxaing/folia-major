@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { MotionValue } from 'framer-motion';
@@ -8,8 +8,6 @@ import LatticePlaybackProvider, { type LatticePlaybackActions } from './LatticeP
 import { LatticeTransportContext, type LatticeTransport } from './LatticeTransportContext';
 import PosterWall from './PosterWall';
 import RadioWall from './radio/RadioWall';
-import LatticeFocusButton from './LatticeFocusButton';
-import WallBackButton from '../../wall/WallBackButton';
 import { buildLatticeTiles, type LatticeTile } from './latticeModel';
 import { useStableCallbacks } from '../../../hooks/useStableCallbacks';
 import { useLatticeSettingsStore } from '../../../stores/useLatticeSettingsStore';
@@ -28,6 +26,7 @@ import { useReducedMotionFor } from '../../../hooks/useReducedMotionFor';
 import { isFlightBackArmed, planPageFromWall } from './wallFlight';
 import { beginWallTrip, WallTripLog } from './wallTripLog';
 import { LATTICE_WALL_ATTR } from '../../collectionFlight';
+import { locatePlayingSongOnWall } from './wallLocate';
 
 // The wall's display layer. It renders the play queue and never mutates it; opened from the
 // explore tab (`latticeSource` in useAppViewStore) it renders the explore page's entries in the
@@ -66,6 +65,12 @@ type LatticeProps = {
     onOpenCollection?: (collection: OmniCollection) => void;
 };
 
+
+/** 一首歌的检索串：歌名 / 歌手 / 专辑，小写。275 首大概 20KB，换来每次过滤只做一次 includes。 */
+const searchKeyOf = (song: SongResult): string => (
+    `${song.name}\u0000${(song.artists ?? []).map(artist => artist.name).join(' ')}\u0000${song.album?.name ?? ''}`.toLowerCase()
+);
+
 export default function Lattice({
     controls,
     lyrics,
@@ -79,7 +84,6 @@ export default function Lattice({
     canTogglePlayback,
     queue,
     isDaylight,
-    onBack,
     onGoHome,
     onOpenPlayer,
     onPlaySong,
@@ -107,7 +111,33 @@ export default function Lattice({
     const isFm = controls.playback.isFmMode;
     const isRadio = !isExplore && (isFm || wallForm === 'radio');
     const explore = useExploreWall({ isOn: isExplore, currentSong, providerId: exploreProviderId, accountId: exploreAccountId });
-    const queueTiles = useMemo(() => buildLatticeTiles({ queue, currentSong }), [currentSong, queue]);
+    // 搜索：输入即时过滤曲库 → 重建 tiles（而不是把不匹配的卡片藏起来，那样结果会散落在巨型画布角落）。
+    const [query, setQuery] = useState('');
+    const [settledQuery, setSettledQuery] = useState('');
+    const [searchOpen, setSearchOpen] = useState(false);
+    const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+    // 搜索框收起：失焦 + 让主进程把窗口挂回壁纸层。
+    const closeSearch = useCallback(() => {
+        // 收起的同时把过滤也撤掉：画面还给完整的 275 张海报墙，而不是一直停在搜索结果上。
+        setSearchOpen(false);
+        setQuery('');
+        setSettledQuery('');
+        searchInputRef.current?.blur();
+        void window.electron?.exitSearchMode?.();
+    }, []);
+
+    // 只有按回车（或点「搜」）才真正过滤：输入过程中墙面不动，不会一边打字一边跳。
+    // 搜出结果后 2 秒自动收起，把画面还给海报墙。
+    const runSearch = useCallback(() => {
+        setSettledQuery(query.trim().toLowerCase());
+    }, [query]);
+
+    const filteredQueue = useMemo(() => (
+        settledQuery ? queue.filter(song => searchKeyOf(song).includes(settledQuery)) : queue
+    ), [queue, settledQuery]);
+
+    const queueTiles = useMemo(() => buildLatticeTiles({ queue: filteredQueue, currentSong }), [currentSong, filteredQueue]);
     const tiles = isExplore ? explore.tiles : queueTiles;
     // The tile whose collection page the wall was left for, when this is the way back from that
     // page: the wall opens on it. Read once and let go of, so that no later opening starts there.
@@ -123,6 +153,8 @@ export default function Lattice({
     const isReturn = startTileId !== null;
     // The cover of a collection's tile flies to the tile's page, and back from it
     // (the grid's morph, wallFlight.ts), unless motion is reduced for that flight or for the wall.
+    // 递进墙面的“返回”回调：这里没有别的页面可回，所以它是空的。
+    const ignoreBack = useCallback(() => undefined, []);
     const reducedMotion = useReducedMotionFor('lattice');
     const coverFlies = !useReducedMotionFor('collectionMorph') && !reducedMotion;
     // Come back to with a flight armed, the wall has the page under it and fades in over it.
@@ -141,26 +173,77 @@ export default function Lattice({
     const overlaysOff = handoffFlip && handoffRole === 'in' && handoffPhase === 'closing';
     const grainOff = overlaysOff || (handoffFlip && handoffRole === 'out' && handoffPhase !== 'waiting' && handoffSession?.seeThrough === true);
 
+    // 定位正在播放的那首：原来右下角有个准星按钮，现在改成按 F（墙上没有输入框，单键够用）。
     useEffect(() => {
-        const handleKeyDown = (event: KeyboardEvent) => {
-            // 别处已经用掉的按键（defaultPrevented）与正在打字的输入框（例如工具面板队列浮岛的歌单名输入）里不接 Ctrl+B。
+        const handleLocateKey = (event: KeyboardEvent) => {
             if (event.defaultPrevented
                 || isTextEntryTarget(event.target)
                 || event.repeat
-                || event.key.toLowerCase() !== 'b'
-                || !isPrimaryModifierPressed(event)
+                || event.key.toLowerCase() !== 'f'
+                || isPrimaryModifierPressed(event)
                 || isSecondaryModifierPressed(event)
                 || event.altKey
                 || event.shiftKey
             ) return;
 
             event.preventDefault();
-            onBack();
+            locatePlayingSongOnWall();
         };
 
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [onBack]);
+        window.addEventListener('keydown', handleLocateKey);
+        return () => window.removeEventListener('keydown', handleLocateKey);
+    }, []);
+
+
+    // 壁纸模式下窗口是 WorkerW 的子窗口，拿不到 WM_CHAR：先让主进程解挂成顶级窗口再聚焦。
+    const openSearchPanel = useCallback(async () => {
+        await window.electron?.enterSearchMode?.();
+        setSearchOpen(true);
+        const focusInput = (attempt: number) => {
+            const el = searchInputRef.current;
+            if (!el) return;
+            el.focus();
+            if (document.activeElement === el) {
+                el.select();
+                return;
+            }
+            if (attempt < 8) {
+                window.setTimeout(() => focusInput(attempt + 1), 60);
+            }
+        };
+        requestAnimationFrame(() => focusInput(0));
+    }, []);
+
+    // 主进程全局快捷键 Ctrl+Alt+F 唤起搜索（壁纸窗口平时没有键盘焦点，/ 收不到）
+    useEffect(() => {
+        const off = window.electron?.onOpenSearch?.(() => { void openSearchPanel(); });
+        return () => off?.();
+    }, [openSearchPanel]);
+
+    // 唤起搜索：/ 或 Ctrl+F。墙面上的单键都有主了（F=定位、S=命令面板），这里不抢。
+    useEffect(() => {
+        const openSearch = (event: KeyboardEvent) => {
+            if (isTextEntryTarget(event.target) || event.repeat) return;
+            const isSlash = event.key === '/';
+            const isFindShortcut = event.key.toLowerCase() === 'f'
+                && isPrimaryModifierPressed(event)
+                && !isSecondaryModifierPressed(event)
+                && !event.altKey
+                && !event.shiftKey;
+            if (!isSlash && !isFindShortcut) return;
+            event.preventDefault();
+            void openSearchPanel();
+        };
+        window.addEventListener('keydown', openSearch);
+        return () => window.removeEventListener('keydown', openSearch);
+    }, []);
+
+    // 播放之后搜索框才消失（并把过滤撤掉回到全墙）。
+    useEffect(() => {
+        if (searchOpen && playerState === PlayerState.PLAYING) {
+            closeSearch();
+        }
+    }, [closeSearch, playerState, searchOpen]);
 
     // The card's own action. A song is played: within the queue there is on the queue wall,
     // with the songs of its section on the explore wall, as the explore page plays it. A
@@ -242,9 +325,10 @@ export default function Lattice({
                     onTogglePlayback={wall.onTogglePlayback}
                     onSeek={wall.onSeek}
                     onOpenPlayer={wall.onOpenPlayer}
-                    onBack={onBack}
+                    onBack={ignoreBack}
                 />
             ) : <PosterWall
+                key={settledQuery}
                 tiles={tiles}
                 sections={isExplore ? explore.sections : undefined}
                 startTileId={startTileId}
@@ -254,11 +338,57 @@ export default function Lattice({
                 onTogglePlayback={wall.onTogglePlayback}
                 onSeek={wall.onSeek}
                 onOpenPlayer={wall.onOpenPlayer}
-                onBack={onBack}
+                onBack={ignoreBack}
             />}
+            {!isRadio && searchOpen && (
+                <div className="lattice-search is-open">
+                    <input
+                        ref={searchInputRef}
+                        className="lattice-search-input"
+                        autoFocus
+                        value={query}
+                        placeholder="搜索歌名 / 歌手 / 专辑"
+                        spellCheck={false}
+                        onFocus={() => setSearchOpen(true)}
+                        onChange={event => setQuery(event.target.value)}
+                        onKeyDown={event => {
+                            // 输入 f / s / 方向键时，绝不让墙面跟着动。
+                            event.stopPropagation();
+                            if (event.key === 'Escape') {
+                                event.preventDefault();
+                                if (query || settledQuery) {
+                                    setQuery('');
+                                    setSettledQuery('');
+                                } else {
+                                    closeSearch();
+                                }
+                                return;
+                            }
+                            if (event.key === 'Enter') {
+                                event.preventDefault();
+                                runSearch();
+                            }
+                        }}
+                    />
+                    <button
+                        type="button"
+                        className="lattice-search-go"
+                        aria-label="搜索"
+                        onClick={runSearch}
+                    >搜</button>
+                    {query ? (
+                        <button
+                            type="button"
+                            className="lattice-search-clear"
+                            aria-label="清空搜索"
+                            onClick={() => { setQuery(''); searchInputRef.current?.focus(); }}
+                        >×</button>
+                    ) : (
+                        <span className="lattice-search-key">Ctrl+F</span>
+                    )}
+                </div>
+            )}
             <WallTripLog isReturn={isReturn} />
-            <LatticeFocusButton isDaylight={isDaylight} tiles={tiles} isRadio={isRadio} showsWallForm={!isExplore} onGoHome={onGoHome} />
-            <WallBackButton label={t('home.latticeBack')} onBack={onBack} />
             {/* The explore page's own control, beside the way back: other entries take the tiles' places. */}
             {isExplore && (
                 // A press with the mouse leaves the focus where it is: the wall's arrow keys and Escape

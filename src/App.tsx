@@ -741,7 +741,9 @@ export default function App() {
     } = useAppNavigation();
 
     // [local-only] 显示永远停在海报墙：播放器那一页已经不挂载了。
-    const currentView = (_navigationView === 'player' ? 'lattice' : _navigationView) as typeof _navigationView;
+    // 这个改版只有海报墙一页：不管导航想去哪（播放页、主页、设置、搜索），渲染的都只有墙。
+    // 分支留着不删（Gemini 的建议：只断渲染，别删文件），但永远走不到。
+    const currentView = 'lattice' as typeof _navigationView;
     const reduceLatticeMotion = useReducedMotionFor('lattice');
     const visualizerAroundWall = useVisualizerAroundWall();
 
