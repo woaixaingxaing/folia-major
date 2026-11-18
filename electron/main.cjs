@@ -6879,6 +6879,12 @@ ipcMain.handle('report-device-pixel-ratio', (event, ratio) => {
 // [local-only] Where the listening statistics land, for the heatmap page to include. A .js file
 // rather than .json: a page opened from disk can load a script, but fetching a .json is refused.
 const PLAY_STATS_DIR = path.join('F:\\', '\u56FE\u7247', 'notes-app');
+ipcMain.handle('local-only:fullscreen', firstParty('local-only:fullscreen', (event, on) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return { ok: false };
+    mainWindow.setFullScreen(Boolean(on));
+    return { ok: true, fullscreen: mainWindow.isFullScreen() };
+}));
+
 ipcMain.handle('play-stats-write', firstParty('play-stats-write', async (event, payload) => {
     const body = `window.__FOLIA_STATS__ = ${JSON.stringify(payload)};\n`;
     const target = path.join(PLAY_STATS_DIR, 'folia-stats.js');

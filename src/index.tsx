@@ -1,6 +1,7 @@
 import { Buffer } from 'buffer';
 // [local-only] Installed before anything else so no module can reach the network at import time.
 import { installOfflineGuard } from './services/offlineGuard';
+import { installIdleFullscreen } from './services/idleFullscreen';
 import { installPlayStatsFlush } from './services/playStats';
 import { installGlobalVisualizerFrameRateLimiter } from './utils/frameRateLimiter';
 import { installConsoleLogCapture } from './utils/consoleLogBuffer';
@@ -15,6 +16,8 @@ installOfflineGuard();
 // [local-only] The statistics export is written once more as the window goes away, where the
 // debounce after a play would never run.
 installPlayStatsFlush();
+// [local-only] 十秒不动就全屏。
+installIdleFullscreen();
 // First, so the debug overlay's console tab has the startup lines too - they are where a failure
 // to reach a library or restore a session shows up.
 installConsoleLogCapture();

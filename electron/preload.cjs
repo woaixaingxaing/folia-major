@@ -60,6 +60,8 @@ contextBridge.exposeInMainWorld('electron', {
     debugOpenLogs: (which) => ipcRenderer.invoke('debug-open-logs', which),
     // [local-only] Writes the listening statistics the heatmap page reads from disk.
     statsWrite: (payload) => ipcRenderer.invoke('play-stats-write', payload),
+    // [local-only] 十秒没操作就全屏，动一下就退出来。
+    setFullscreen: (on) => ipcRenderer.invoke('local-only:fullscreen', on),
     statsWriteCover: (assetId, ext, bytes) =>
         ipcRenderer.invoke('play-stats-cover', { assetId, ext, bytes }),
     // Batched by the caller - one message per line would cost more than the logging it records.
