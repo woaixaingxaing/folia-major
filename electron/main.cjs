@@ -6881,6 +6881,16 @@ ipcMain.handle('report-device-pixel-ratio', (event, ratio) => {
 const PLAY_STATS_DIR = path.join('F:\\', '\u56FE\u7247', 'notes-app');
 ipcMain.handle('local-only:fullscreen', firstParty('local-only:fullscreen', (event, on) => {
     if (!mainWindow || mainWindow.isDestroyed()) return { ok: false };
+    if (on) {
+        // [local-only] 全屏跟着窗口所在的那块屏走，而窗口可能停在别的屏上（上次的布局）。
+        // 进全屏前先挪到壁纸目标屏，保证壁纸和全屏在同一块屏。
+        try {
+            const target = getChosenOrPrimaryWallpaperDisplay();
+            if (target && target.bounds) mainWindow.setBounds(target.bounds);
+        } catch (error) {
+            // 显示器列表正在变化，保持原位即可。
+        }
+    }
     mainWindow.setFullScreen(Boolean(on));
     return { ok: true, fullscreen: mainWindow.isFullScreen() };
 }));
