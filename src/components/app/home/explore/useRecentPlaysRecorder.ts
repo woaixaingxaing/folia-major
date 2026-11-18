@@ -7,6 +7,7 @@ import { getPlaybackSongKey, getPlaybackSourceRef } from '../../../../utils/appP
 import { usePlaybackStore } from '../../../../stores/usePlaybackStore';
 import { getObservedMedia, type ObservedMedia } from '../../../../services/hifi/hifiMediaShim';
 import { getNavidromeConfig } from '../../../../services/navidromeService';
+import { recordPlayStats } from '../../../../services/playStats';
 
 // src/components/app/home/explore/useRecentPlaysRecorder.ts
 // Writes Folia's own record of the songs played here (recentPlays.ts). A song (of an online
@@ -38,7 +39,7 @@ type UseRecentPlaysRecorderParams = {
  * in seconds, as `dueAt` asks for the next report; both are handed how many reports were made
  * before. Paused time and seeks add nothing. Returns what stops the following.
  */
-export const whenHeard = (audio: ObservedMedia, dueAt: (reports: number) => number, onHeard: (reports: number) => void): (() => void) => {
+export const whenHeard = (audio: ObservedMedia, dueAt: (reports: number) => number, onHeard: (reports: number, heard: number) => void): (() => void) => {
     let heard = 0;
     let reports = 0;
     let last = audio.currentTime || 0;
@@ -50,7 +51,7 @@ export const whenHeard = (audio: ObservedMedia, dueAt: (reports: number) => numb
         heard += step;
         if (heard < dueAt(reports)) return;
         reports += 1;
-        onHeard(reports - 1);
+        onHeard(reports - 1, heard);
     }
     audio.addEventListener('timeupdate', handleTimeUpdate);
     return () => audio.removeEventListener('timeupdate', handleTimeUpdate);
@@ -86,10 +87,15 @@ export const useRecentPlaysRecorder = ({ audioRef, currentSong, activeDeck }: Us
             const length = lengthOf(audio, song.current);
             return Math.min(length * LISTENING_SHARE, LISTENING_SECONDS_AT_MOST) + (reports - 1) * length;
         };
-        return whenHeard(audio, dueAt, reports => {
-            const heard = song.current;
-            const source = heard ? getPlaybackSourceRef(heard) : null;
-            if (!heard || !source || source.kind === 'stage') return;
+          // [local-only] What the heatmap page reads: how much was heard, and on what day.
+          let reportedMs = 0;
+          return whenHeard(audio, dueAt, (reports, sounded) => {
+              const heard = song.current;
+              const source = heard ? getPlaybackSourceRef(heard) : null;
+              if (!heard || !source || source.kind === 'stage') return;
+              const soundedMs = Math.round(sounded * 1000);
+              recordPlayStats(heard, songKey ?? getPlaybackSongKey(heard), soundedMs - reportedMs, reports === 0);
+              reportedMs = soundedMs;
             // The account at that moment: a listener can sign out or in during the song. A Navidrome
             // song's is the user at its server; a local file has none.
             const accountId = source.kind === 'online'

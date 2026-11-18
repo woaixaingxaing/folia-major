@@ -6856,6 +6856,22 @@ ipcMain.handle('report-device-pixel-ratio', (event, ratio) => {
   }
 });
 
+// [local-only] Where the listening statistics land, for the heatmap page to include. A .js file
+// rather than .json: a page opened from disk can load a script, but fetching a .json is refused.
+const PLAY_STATS_DIR = path.join('F:\\', '\u56FE\u7247', 'notes-app');
+ipcMain.handle('play-stats-write', firstParty('play-stats-write', (event, payload) => {
+    try {
+        fs.mkdirSync(PLAY_STATS_DIR, { recursive: true });
+        const target = path.join(PLAY_STATS_DIR, 'folia-stats.js');
+        const tmp = `${target}.tmp`;
+        fs.writeFileSync(tmp, `window.__FOLIA_STATS__ = ${JSON.stringify(payload)};\n`, 'utf8');
+        fs.renameSync(tmp, target);
+        return { ok: true };
+    } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+}));
+
 ipcMain.handle('get-settings', firstParty('get-settings', () => {
   return getPublicSettings();
 }));
