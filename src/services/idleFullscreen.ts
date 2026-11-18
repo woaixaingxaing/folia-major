@@ -1,65 +1,14 @@
 // src/services/idleFullscreen.ts
 //
-// [local-only] 桌面上一面墙，看完不该还留着一个窗口边框。手停下来十秒就进全屏，鼠标一动就退出来。
-// 判断"有没有操作"只看真实的输入事件：鼠标移动、按下、滚轮、键盘、触摸。
-
-import { usePlaybackStore } from '../stores/usePlaybackStore';
-import { PlayerState } from '../types';
-
-const IDLE_MS = 10_000;
-/** 鼠标只有停在原地时的细碎抖动不算操作，超过这个距离才算。 */
-const MOVE_THRESHOLD_PX = 4;
-
-type Bridge = { setFullscreen?: (on: boolean) => Promise<unknown> | void };
+// [local-only][off] 暂停使用。
+//
+// 原本的意图是：放歌的时候手停十秒就进全屏、动鼠标退出来。但壁纸模式下这个窗口是
+// WorkerW 的子窗口（WS_CHILD），而 Electron 的 setFullScreen 会改窗口样式把它从桌面层
+// 上摘下来 —— 实测表现就是整个窗口变成白色。真正要做的不是"改窗口样式"，而是
+// "把窗口铺满目标显示器并压过任务栏"，那需要先解决挂载与坐标换算，属于原生层的改动。
+//
+// 在那边修好之前，这个功能保持关闭：留一个空实现，调用点不用改。
 
 export const installIdleFullscreen = (): void => {
-    if (typeof window === 'undefined') return;
-    const bridge = (globalThis as { electron?: Bridge }).electron;
-    if (!bridge?.setFullscreen) return;
-
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let fullscreen = false;
-    let lastX: number | null = null;
-    let lastY: number | null = null;
-
-    // [local-only] 只在放歌的时候进全屏：空着桌面不该突然盖住任务栏。
-    const isPlaying = (): boolean => usePlaybackStore.getState().playerState === PlayerState.PLAYING;
-
-    const enter = (): void => {
-        if (fullscreen || !isPlaying()) return;
-        fullscreen = true;
-        void bridge.setFullscreen?.(true);
-    };
-
-    const leave = (): void => {
-        if (!fullscreen) return;
-        fullscreen = false;
-        void bridge.setFullscreen?.(false);
-    };
-
-    const arm = (): void => {
-        if (timer !== null) clearTimeout(timer);
-        timer = setTimeout(() => { timer = null; enter(); }, IDLE_MS);
-    };
-
-    const wake = (): void => {
-        leave();
-        arm();
-    };
-
-    window.addEventListener('pointerdown', wake, { passive: true });
-    window.addEventListener('wheel', wake, { passive: true });
-    window.addEventListener('keydown', wake, { passive: true });
-    window.addEventListener('touchstart', wake, { passive: true });
-
-    window.addEventListener('pointermove', event => {
-        const moved = lastX === null || lastY === null
-            || Math.abs(event.clientX - lastX) > MOVE_THRESHOLD_PX
-            || Math.abs(event.clientY - lastY) > MOVE_THRESHOLD_PX;
-        lastX = event.clientX;
-        lastY = event.clientY;
-        if (moved) wake();
-    }, { passive: true });
-
-    arm();
+    // 故意什么都不做。见文件顶部说明。
 };
