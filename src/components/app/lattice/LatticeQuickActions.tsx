@@ -23,6 +23,10 @@ type LatticeQuickActionsProps = {
 };
 
 const LatticeQuickActions = ({ tile, width, expanded }: LatticeQuickActionsProps) => {
+    // [local-only] 记笔记与收藏都是给在线曲库用的：本地文件的歌本来就在硬盘上，收藏没有意义，
+    // 笔记也从没被打开过。两个按钮在这里直接不渲染，卡片上只剩封面与歌名。
+    void tile; void width; void expanded;
+    return null;
     const { t } = useTranslation();
     if (width < LATTICE_QUICK_ACTIONS_MIN_WIDTH) return null;
     const { song } = tile;
