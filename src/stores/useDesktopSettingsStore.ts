@@ -377,9 +377,8 @@ export const useDesktopSettingsStore = create<DesktopSettingsState>((set, get) =
         set({ wallpaperEntryConfirmOpen: false });
     },
         applyWallpaperMode: (requested) => {
-            // [local-only] There is no other mode: a request to leave wallpaper mode is ignored.
-            const enable = true;
-            void requested;
+            // [local-only] 空闲全屏会临时退出壁纸模式，所以这里要照做。
+            const enable = Boolean(requested);
             setStoredBoolean(WALLPAPER_MODE_STORAGE_KEY, enable);
             set({ wallpaperMode: enable });
         if (enable) {
