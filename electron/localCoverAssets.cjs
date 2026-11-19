@@ -208,7 +208,9 @@ function createLocalCoverAssetStore({ getDirectory, createThumbnail }) {
       return new Response(fileResponse.body, {
         status: 200,
         headers: {
-          'Cache-Control': 'public, max-age=31536000, immutable',
+          // 不落 HTTP 缓存：277 张原图字节已在磁盘与渲染层各有一份，
+          // 再让 Chromium 内存缓存存一遍等于第三份拷贝。
+          'Cache-Control': 'no-store',
           'Content-Length': String(responseDescriptor.size),
           'Content-Type': responseDescriptor.mimeType,
           'X-Content-Type-Options': 'nosniff',

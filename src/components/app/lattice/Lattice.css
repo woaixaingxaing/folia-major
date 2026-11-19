@@ -360,3 +360,20 @@
     backdrop-filter: blur(10px);
 }
 .lattice-search-go:hover { background: rgba(255, 255, 255, 0.2); }
+
+
+/* ===== 非播放封面默认隐藏文字层与底部渐变遮罩（仅悬停 / 当前播放显示）===== */
+.lattice-root .lattice-poster .lattice-poster-copy,
+.lattice-root .lattice-poster .lattice-poster-shade {
+  opacity: 0;
+  transition: opacity 220ms ease;
+  pointer-events: none;
+}
+
+.lattice-root .lattice-poster:hover .lattice-poster-copy,
+.lattice-root .lattice-poster:hover .lattice-poster-shade,
+.lattice-root .lattice-poster.is-current .lattice-poster-copy,
+.lattice-root .lattice-poster.is-current .lattice-poster-shade {
+  opacity: 1;
+  pointer-events: none;
+}

@@ -1,3 +1,4 @@
+import { useLatticePlaybackActions } from './LatticePlaybackProvider';
 import { motionValue } from 'framer-motion';
 import { ArrowUpRight, Pause, Play } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -38,6 +39,11 @@ export default function LatticePlaybackControls({
     const isCurrentSong = Boolean(
         currentSong && getPlaybackSongKey(currentSong) === getPlaybackSongKey(tile.song),
     );
+    // context 类型在本文件里没有那两个可选方法，这里用结构类型放宽，避免为一个 hover 去动公共类型
+    const playbackActions = useLatticePlaybackActions() as unknown as {
+        onTimelineHoverOpen?: () => void;
+        onTimelineHoverLeave?: () => void;
+    };
     const canControlCurrent = isCurrentSong && canTogglePlayback;
     const isPlaying = canControlCurrent && playerState === PlayerState.PLAYING;
     const duration = canControlCurrent
@@ -52,7 +58,11 @@ export default function LatticePlaybackControls({
             role="group"
             aria-label={t('home.latticePlaybackControls')}
         >
-            <div className="lattice-chrome-transport">
+            <div
+                className="lattice-chrome-transport"
+                // 悬停自动展开「下一首」已取消：改回点击才展开
+
+            >
                 <button
                     type="button"
                     className="lattice-transport-button"

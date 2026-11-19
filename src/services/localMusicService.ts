@@ -1638,6 +1638,11 @@ export async function getAudioFromLocalSong(song: LocalSong): Promise<string | n
         }
     }
 
+    // 库外文件（双击进来的临时歌）没有 FileSystemFileHandle：改走主进程的 folia-ext:// 直读流。
+    if (song.id.startsWith('ext:') && song.filePath) {
+        return `folia-ext://file?path=${encodeURIComponent(song.filePath)}`;
+    }
+
     // No accessible handle available - permission may need to be restored or the file moved.
     console.warn(`[LocalMusic] No accessible handle for song ${song.id}. Permission restore or re-import is required.`);
     return null;

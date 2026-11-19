@@ -238,6 +238,32 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.on('local-only:open-search', listener);
     return () => ipcRenderer.removeListener('local-only:open-search', listener);
   },
+  onShuffleWall: (callback) => {
+    const listener = (_event, mode) => callback(mode);
+    ipcRenderer.on('local-only:shuffle-wall', listener);
+    return () => ipcRenderer.removeListener('local-only:shuffle-wall', listener);
+  },
+  onLibraryFsChanged: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('local-only:library-fs-changed', listener);
+    return () => ipcRenderer.removeListener('local-only:library-fs-changed', listener);
+  },
+  onLocatePlaying: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('local-only:locate-playing', listener);
+    return () => ipcRenderer.removeListener('local-only:locate-playing', listener);
+  },
+  onPlayExternalFile: (callback) => {
+    const listener = (_event, filePath) => callback(filePath);
+    ipcRenderer.on('local-only:play-external-file', listener);
+    return () => ipcRenderer.removeListener('local-only:play-external-file', listener);
+  },
+  consumePendingExternalFile: () => ipcRenderer.invoke('local-only:consume-pending-external-file'),
+  onSearchQuery: (callback) => {
+    const listener = (_event, text) => callback(text);
+    ipcRenderer.on('local-only:search-query', listener);
+    return () => ipcRenderer.removeListener('local-only:search-query', listener);
+  },
   enterSearchMode: () => ipcRenderer.invoke('local-only:enter-search'),
   exitSearchMode: () => ipcRenderer.invoke('local-only:exit-search'),
     closeWindow: () => ipcRenderer.invoke('window-close'),

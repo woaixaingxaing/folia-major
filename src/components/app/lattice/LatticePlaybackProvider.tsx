@@ -1,4 +1,4 @@
-import { createContext, lazy, Suspense, useContext, useMemo, useState, type ReactNode } from 'react';
+import { createContext, lazy, Suspense, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { MotionValue } from 'framer-motion';
 import type { LyricData, SongResult } from '../../../types';
@@ -38,6 +38,8 @@ type Props = {
     actions: LatticePlaybackActions;
     currentSong: SongResult | null;
     queue: SongResult[];
+    /** 从播放列表面板点某一行时调用。 */
+    onPlaySong?: (song: SongResult) => void;
     lyrics: LyricData | null;
     currentTime: MotionValue<number>;
     /** The lyric clock (media time + preview clip start - manual offset): what the timeline's lines are timed on. */
@@ -49,8 +51,27 @@ type Props = {
     children: ReactNode;
 };
 
-export default function LatticePlaybackProvider({ actions, currentSong, queue, lyrics, currentTime, lyricCurrentTime, duration, onSeek, isDaylight, children }: Props) {
+export default function LatticePlaybackProvider({ actions, currentSong, queue, onPlaySong, lyrics, currentTime, lyricCurrentTime, duration, onSeek, isDaylight, children }: Props) {
     const [timelineOpen, setTimelineOpen] = useState(false);
+    // 悬停展开/收起：移出 250ms 后才关，留出鼠标从控制条滑进卡片的路径
+    const closeTimerRef = useRef<number | null>(null);
+    const cancelClose = () => {
+        if (closeTimerRef.current !== null) {
+            window.clearTimeout(closeTimerRef.current);
+            closeTimerRef.current = null;
+        }
+    };
+    const scheduleClose = () => {
+        cancelClose();
+        closeTimerRef.current = window.setTimeout(() => {
+            closeTimerRef.current = null;
+            setTimelineOpen(false);
+        }, 250);
+    };
+    const openTimeline = () => {
+        cancelClose();
+        setTimelineOpen(true);
+    };
     // The timeline highlights and seeks on the lyric clock; a click is turned back into media time
     // here (see resolveLyricSeekMediaTime for a line outside a preview clip).
     const seekLyricTime = (lyricTimeSec: number) => {
@@ -76,6 +97,8 @@ export default function LatticePlaybackProvider({ actions, currentSong, queue, l
             likeDisabled: resolveLikeAvailability(currentSong, Boolean(actions.disabled), Boolean(actions.isStageActive)).disabled,
             hasLyrics: Boolean(lyrics?.lines.length),
             onToggleTimeline: () => setTimelineOpen(value => !value),
+        onTimelineHoverOpen: openTimeline,
+        onTimelineHoverLeave: scheduleClose,
             invokeCommandById: actions.invokeCommandById,
             canInvokeCommandById: actions.canInvokeCommandById,
             isFmMode: actions.playback.isFmMode,
@@ -86,8 +109,11 @@ export default function LatticePlaybackProvider({ actions, currentSong, queue, l
     return <PlaybackContext.Provider value={context}>
         {children}
         {timelineOpen && createPortal(<Suspense fallback={null}>
-            <LyricsTimelineModal isOpen onClose={() => setTimelineOpen(false)} lyrics={lyrics}
-                currentTime={lyricCurrentTime} duration={duration} onSeek={seekLyricTime} isDaylight={isDaylight} disabled={actions.disabled} />
+            <LyricsTimelineModal isOpen onClose={() => setTimelineOpen(false)}
+                queue={queue} currentSong={currentSong}
+                onPlay={(song) => { onPlaySong?.(song); setTimelineOpen(false); }}
+                onHoverEnter={cancelClose} onHoverLeave={scheduleClose}
+                isDaylight={isDaylight} />
         </Suspense>, document.body)}
     </PlaybackContext.Provider>;
 }

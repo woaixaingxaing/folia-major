@@ -160,6 +160,20 @@ const linuxGraphicsMode =
 // from the schemes registered earlier.
 protocol.registerSchemesAsPrivileged([
   {
+    scheme: 'thumb',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
+  },
+  {
+    scheme: 'folia-ext',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+  {
     scheme: 'folia-cover',
     privileges: {
       standard: true,
@@ -276,6 +290,22 @@ function appendChromiumFeature(featureName, switchName = 'enable-features') {
 
 if (process.platform === 'win32' || process.platform === 'darwin') {
   appendChromiumFeature('ReleaseVideoSourceProviderIfNotInUse');
+}
+
+// FOLIA_MEMORY_SLIM: 纯底层限流，不碰任何 UI / 动画 / 交互。
+// 目的：把 V8 堆、渲染进程数、磁盘/媒体缓存和多余的后台特性收一收。
+// 硬规则：绝不覆盖 js-flags（应用自带的 --max-old-space-size=192 就是它调好的值）
+app.commandLine.appendSwitch('renderer-process-limit', '2');
+app.commandLine.appendSwitch('disk-cache-size', '10485760');
+app.commandLine.appendSwitch('media-cache-size', '10485760');
+for (const slimFeature of [
+  'BackForwardCache',
+  'SpareRendererForSitePerProcess',
+  'MediaRouter',
+  // 关掉遮挡计算：壁纸窗被别的窗口盖住时，Chromium 不会把它当成不可见而降频
+  'CalculateNativeWinOcclusion',
+]) {
+  appendChromiumFeature(slimFeature, 'disable-features');
 }
 
 // macOS: GPU 加速优化，解决 Intel Mac + AMD 独显在 Retina 屏幕下的渲染卡顿
@@ -2215,8 +2245,30 @@ async function prepareMainProcessStartup() {
     return 'duplicate';
   }
 
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, commandLine) => {
+    const externalEarly = extractAudioPathFromArgv(commandLine);
+    // 壁纸模式下不要把 WorkerW 底层窗口提成普通顶层：那会挡住任务栏底边热区。
+    // 有外部音频就只发消息起播，没有外部音频也保持原样不抢焦点。
+    if (isWindowsWallpaperMode()) {
+      if (externalEarly && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('local-only:play-external-file', externalEarly);
+        console.log('[external] wallpaper mode, play request', externalEarly);
+      } else if (externalEarly) {
+        pendingExternalTrackPath = externalEarly;
+      }
+      return;
+    }
     focusMainWindow();
+    // 文件夹里双击音频：不抢窗口，直接把路径丢给已有的壁纸实例起播。
+    const external = extractAudioPathFromArgv(commandLine);
+    if (external) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('local-only:play-external-file', external);
+        console.log('[external] play request', external);
+      } else {
+        pendingExternalTrackPath = external;
+      }
+    }
   });
 
   if (isWallpaperWrapped()) {
@@ -2638,6 +2690,9 @@ const macDockMenu = createMacDockMenu({
 let remoteControlWindow = null;
 let appTray = null;
 let latestRemoteControlSnapshot = null;
+let lastRemotePushAt = 0;
+// 后台自动遥控窗总开关：当前版本先关闭，避免多屏合成层与状态机互相干扰
+const REMOTE_AUTO_ENABLED = false;
 let obsBrowserSourceServer = null;
 let latestObsBrowserSourceConfig = null;
 let latestObsBrowserSourceClock = null;
@@ -5595,12 +5650,27 @@ function setMainWindowClickThroughUnlockHover(active) {
   return mainWindowClickThroughUnlockHover;
 }
 
+function remoteTrackIdOf(snapshot) {
+  if (!snapshot) {
+    return null;
+  }
+  return snapshot.trackId
+    || (snapshot.track && (snapshot.track.id || snapshot.track.songId))
+    || (snapshot.currentSong && (snapshot.currentSong.id || snapshot.currentSong.songId))
+    || null;
+}
+
 function sendRemoteControlSnapshot(snapshot) {
   if (!remoteControlWindow || remoteControlWindow.isDestroyed()) {
     return false;
   }
 
   remoteControlWindow.webContents.send('remote-control-snapshot', snapshot);
+  // 副屏 + transparent 窗口组合下，Chromium 偶尔不再重绘（画面定格）。
+  // 每次推完强制失效一次，代价很低，但能保证合成层重新出图。
+  try {
+    remoteControlWindow.webContents.invalidate();
+  } catch (error) { /* ignore */ }
   return true;
 }
 
@@ -5779,14 +5849,18 @@ function getRestoredRemoteControlWindowPosition() {
   );
 }
 
-function createRemoteControlWindow() {
+function createRemoteControlWindow(options = {}) {
   if (remoteControlWindow && !remoteControlWindow.isDestroyed()) {
     remoteControlWindow.setTitle(REMOTE_CONTROL_WINDOW_TITLE);
     applyRemoteControlAlwaysOnTop(remoteControlWindow);
     applyRemoteControlSkipTaskbar(remoteControlWindow);
     applyRemoteControlWindowPresentation(remoteControlWindow);
-    remoteControlWindow.show();
-    remoteControlWindow.focus();
+    if (options && options.inactive) {
+      remoteControlWindow.showInactive();
+    } else {
+      remoteControlWindow.show();
+      remoteControlWindow.focus();
+    }
     broadcastPlaybackSyncBridgeStatus();
     refreshTrayMenu();
     return remoteControlWindow;
@@ -5809,9 +5883,12 @@ function createRemoteControlWindow() {
     maxWidth: REMOTE_CONTROL_WINDOW_WIDTH,
     maxHeight: REMOTE_CONTROL_WINDOW_HEIGHT,
     frame: false,
-    transparent: true,
+    // 副屏 + 透明窗在 Windows 上会偶发不重绘甚至整窗消失：
+    // 直接放弃透明层，用不透明圆角窗，稳定优先。
+    transparent: false,
+    roundedCorners: true,
     hasShadow: false,
-    backgroundColor: '#00000000',
+    backgroundColor: '#121418',
     title: REMOTE_CONTROL_WINDOW_TITLE,
     name: 'folia-remote',
     autoHideMenuBar: true,
@@ -5832,6 +5909,20 @@ function createRemoteControlWindow() {
 
   remoteControlWindow = win;
   isolateFirstPartyWindow(win);
+
+  // 遥控窗是透明无边框窗：把根节点的实心背景去掉，
+  // 否则圆角卡片外面会露出一圈直角大黑边。
+  const makeRemoteRootTransparent = () => {
+    try {
+      win.webContents.insertCSS(
+        'html, body, #root, #app { background: transparent !important; }',
+      );
+    } catch (error) {
+      console.warn('[remote] transparent css failed', error && error.message);
+    }
+  };
+  win.webContents.on('dom-ready', makeRemoteRootTransparent);
+  win.webContents.on('did-finish-load', makeRemoteRootTransparent);
   remoteControlQueueExpansion = null;
   remoteControlPointerInside = false;
   remoteControlMouseIgnored = false;
@@ -5987,8 +6078,13 @@ function createWindow(options = {}) {
   // wallpaper belongs behind the taskbar as well. Both go to the display chosen in Settings while
   // it is connected. Without that, X11 stays on the primary display and Windows follows the
   // display the app window is on (see windowsWallpaperTarget.cjs).
+  // 严格锁主屏：壁纸窗只覆盖主屏 1920x1080 (0,0)，绝不跨到副屏，
+  // 否则副屏会露出 Chromium 的默认白底。挂进 WorkerW 后由 helper 再按客户区换算坐标。
   const wallpaperBounds = useWallpaperGeometry
-    ? (useWindowsWallpaper ? getWallpaperTargetBounds() : getX11WallpaperBounds())
+    ? (() => {
+      const primary = screen.getPrimaryDisplay();
+      return { x: primary.bounds.x, y: primary.bounds.y, width: primary.bounds.width, height: primary.bounds.height };
+    })()
     : null;
   const windowBounds = wallpaperBounds || ensureWindowBoundsVisible(storedBounds);
   const isMaximized = useWallpaperGeometry ? false : storedMaximized;
@@ -6021,7 +6117,10 @@ function createWindow(options = {}) {
       // window as frame-bearing and the geometry work leaves frame-width gaps at the screen
       // edges (and the pre-attach bounds get adjusted off the requested display rect).
       thickFrame: process.platform === 'win32' ? !useTransparentWindow && !useWindowsWallpaper : undefined,
-      backgroundColor: (useTransparentWindow || enableNativeBlur) ? '#00000000' : '#09090b',
+      // 壁纸模式用不透明深色底：透明合成失败或跨屏溢出时，露出来的也是 #070707 而不是白底
+      backgroundColor: useWallpaperGeometry
+        ? '#070707'
+        : ((useTransparentWindow || enableNativeBlur) ? '#00000000' : '#09090b'),
       vibrancy: (!useTransparentWindow && enableNativeBlur) && process.platform === 'darwin' ? 'fullscreen-ui' : undefined,
       backgroundMaterial: (!useTransparentWindow && enableNativeBlur) && process.platform === 'win32' ? 'acrylic' : undefined,
       autoHideMenuBar: true,
@@ -6442,23 +6541,1103 @@ async function setMainWindowTransparentModeFromRemote(enabled) {
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=192 --expose-gc');
 app.commandLine.appendSwitch('gpu-program-cache-size-kb', '16384');
 
-app.whenReady().then(async () => {
-    // 壁纸窗口平时拿不到键盘焦点，页面里监听的 / 和 Ctrl+F 收不到，所以搜索必须有一个
-    // 全局快捷键：Ctrl+Alt+F。按下去先解挂 WorkerW 拿真焦点，再让渲染层弹出搜索框。
+
+// ===== 桌面模式 + 迷你遥控联动：统一状态机（2026-11-19 重构）=====
+// 唯一权威状态放在 desk 里：任何跃迁只改这里，然后统一清定时器 / 重算窗口，
+// 不再让 tick、定时器、IPC 各自维护一份布尔值。
+const DESKTOP_LOG_PATH = require('path').join(app.getPath('userData'), 'desktop-mode.log');
+function desktopLog(message) {
+  try {
+    require('fs').appendFileSync(DESKTOP_LOG_PATH, new Date().toISOString() + '  ' + message + '\r\n');
+  } catch (error) { /* ignore */ }
+}
+
+const desk = {
+  isPlaying: false,
+  exposed: null,            // 任务栏口径：桌面可见（本进程窗口算桌面的一部分）
+  exposedForRemote: null,   // 遥控口径：只有真桌面 / 壁纸算，遥控窗自己不算
+  foregroundClass: '',
+  foregroundPid: 0,
+  selfForeground: false,
+  remoteForeground: false,
+  dismissedTrackId: null,   // 用户手动关掉的那一首：同一首不再自动弹
+  backstageEnterAt: 0,
+  lastTaskbarHide: null,    // null = 未知，下一次必须重新下发
+  taskbarTarget: null,
+  taskbarStable: 0,
+  lastProbeAt: 0,
+  probe: null,
+  pushCount: 0,
+};
+
+// 快照推送限流共用模块级的 lastRemotePushAt（在快照区声明）
+
+const deskTimers = { pauseHide: null, remoteDestroy: null };
+function clearDeskTimer(name) {
+  const timer = deskTimers[name];
+  if (timer) {
+    clearTimeout(timer);
+    deskTimers[name] = null;
+  }
+}
+
+// --- Win32 前台窗口探测（每个 tick 只探一次，避免两次判定不一致）
+let desktopModeKoffi = null;
+function desktopModeApi() {
+  if (desktopModeKoffi) {
+    return desktopModeKoffi;
+  }
+  const koffi = require('koffi');
+  const user32 = koffi.load('user32.dll');
+  desktopModeKoffi = {
+    getForegroundWindow: user32.func('void* GetForegroundWindow()'),
+    getClassName: user32.func('int GetClassNameW(void* hWnd, _Out_ uint16_t* buf, int n)'),
+    isIconic: user32.func('bool IsIconic(void* hWnd)'),
+    getWindowThreadProcessId: user32.func('uint32_t GetWindowThreadProcessId(void* hWnd, _Out_ uint32_t* pid)'),
+    getWindowText: user32.func('int GetWindowTextW(void* hWnd, _Out_ uint16_t* buf, int n)'),
+  };
+  return desktopModeKoffi;
+}
+
+function desktopClassNameOf(handle) {
+  const api = desktopModeApi();
+  const buffer = new Uint16Array(256);
+  const length = api.getClassName(handle, buffer, 256);
+  let name = '';
+  for (let i = 0; i < length; i += 1) {
+    name += String.fromCharCode(buffer[i]);
+  }
+  return name;
+}
+
+function desktopWindowTitleOf(handle) {
+  const api = desktopModeApi();
+  const buffer = new Uint16Array(256);
+  const length = api.getWindowText(handle, buffer, 256);
+  let title = '';
+  for (let i = 0; i < length; i += 1) {
+    title += String.fromCharCode(buffer[i]);
+  }
+  return title;
+}
+
+const DESKTOP_WINDOW_CLASSES = new Set([
+  'Progman', 'WorkerW', 'Shell_TrayWnd', 'SysListView32', 'SHELLDLL_DefView',
+]);
+
+function probeForeground(force) {
+  if (!force && desk.probe && Date.now() - desk.lastProbeAt < 250) {
+    return desk.probe;
+  }
+  const probe = { hasWindow: false, iconic: false, cls: '', pid: 0, title: '' };
+  try {
+    const api = desktopModeApi();
+    const handle = api.getForegroundWindow();
+    if (handle) {
+      probe.hasWindow = true;
+      probe.iconic = Boolean(api.isIconic(handle));
+      probe.cls = desktopClassNameOf(handle);
+      const pidBuffer = new Uint32Array(1);
+      api.getWindowThreadProcessId(handle, pidBuffer);
+      probe.pid = Number(pidBuffer[0]);
+      probe.title = desktopWindowTitleOf(handle);
+    }
+  } catch (error) {
+    desktopLog('probeForeground failed: ' + (error && error.message));
+  }
+  desk.probe = probe;
+  desk.lastProbeAt = Date.now();
+  return probe;
+}
+
+/**
+ * 统一判定：本进程的所有窗口都不参与「别的程序在前台」这件事。
+ *  - 壁纸主窗 / 隐藏子窗：本进程自己，不算别的程序
+ *  - 遥控窗：对桌面判定**透明**，不改变上一次的结论（否则点击/弹出遥控窗会把桌面状态刷掉）
+ */
+function classifyForeground(probe, mode) {
+  if (!probe || !probe.hasWindow) { return true; }
+  if (probe.iconic) { return true; }
+  if (DESKTOP_WINDOW_CLASSES.has(probe.cls)) { return true; }
+  if (probe.pid === process.pid) {
+    if (probe.title.indexOf(REMOTE_CONTROL_WINDOW_TITLE) !== -1) {
+      const previous = mode === 'remote' ? desk.exposedForRemote : desk.exposed;
+      return previous === true;
+    }
+    return true;
+  }
+  return false;
+}
+
+function isDesktopExposed() {
+  return desk.exposed === true;
+}
+
+// --- 任务栏自动隐藏（ABM_SETSTATE / ABM_GETSTATE）
+const TASKBAR_PS = [
+  'param([string]$hide)',
+  'Add-Type -TypeDefinition @"',
+  'using System; using System.Runtime.InteropServices;',
+  'public class FoliaTaskbar {',
+  ' [StructLayout(LayoutKind.Sequential)] public struct APPBARDATA { public int cbSize; public IntPtr hWnd; public int uCallbackMessage; public int uEdge; public RECT rc; public IntPtr lParam; }',
+  ' [StructLayout(LayoutKind.Sequential)] public struct RECT { public int left, top, right, bottom; }',
+  ' [DllImport("shell32.dll")] public static extern uint SHAppBarMessage(uint m, ref APPBARDATA d);',
+  ' public static void Set(bool hide) { APPBARDATA d = new APPBARDATA(); d.cbSize = Marshal.SizeOf(d); d.lParam = (IntPtr)(hide ? 1 : 2); SHAppBarMessage(10, ref d); }',
+  ' public static uint Get() { APPBARDATA d = new APPBARDATA(); d.cbSize = Marshal.SizeOf(d); return SHAppBarMessage(4, ref d); }',
+  '}',
+  '"@',
+  'if ($hide -eq "get") { Write-Output ([FoliaTaskbar]::Get() -band 1); exit 0 }',
+  'if ($hide -eq "1") { [FoliaTaskbar]::Set($true) } else { [FoliaTaskbar]::Set($false) }',
+].join("\r\n");
+
+function taskbarScriptPath() {
+  const scriptPath = require('path').join(app.getPath('userData'), 'taskbar-autohide.ps1');
+  try {
+    require('fs').writeFileSync(scriptPath, TASKBAR_PS, 'utf8');
+  } catch (error) {
+    desktopLog('autohide script write failed: ' + (error && error.message));
+  }
+  return scriptPath;
+}
+
+function applyTaskbarAutoHide(hide, options) {
+  const wanted = Boolean(hide);
+  const force = Boolean(options && options.force);
+  if (!force && desk.lastTaskbarHide === wanted) {
+    return;
+  }
+  desk.lastTaskbarHide = wanted;
+  try {
+    require('child_process').execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', taskbarScriptPath(), '-hide', wanted ? '1' : '0'],
+      { windowsHide: true },
+      (error) => {
+        if (error) {
+          desktopLog('autohide failed: ' + error.message);
+          desk.lastTaskbarHide = null;
+        } else {
+          desktopLog('autohide applied -> ' + wanted);
+        }
+      },
+    );
+  } catch (error) {
+    desk.lastTaskbarHide = null;
+    desktopLog('autohide setup failed: ' + (error && error.message));
+  }
+}
+
+function readTaskbarAutoHide(callback) {
+  try {
+    require('child_process').execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', taskbarScriptPath(), '-hide', 'get'],
+      { windowsHide: true },
+      (error, stdout) => {
+        if (error) {
+          desktopLog('autohide read failed: ' + error.message);
+          callback(null);
+          return;
+        }
+        callback(String(stdout || '').trim() === '1');
+      },
+    );
+  } catch (error) {
+    desktopLog('autohide read setup failed: ' + (error && error.message));
+    callback(null);
+  }
+}
+
+// 状态缓存可能和系统实际状态漂移（别的程序也改过任务栏）：每 10 秒对一次账
+let taskbarDriftCheckAt = 0;
+function verifyTaskbarDrift() {
+  const now = Date.now();
+  if (now - taskbarDriftCheckAt < 10000) { return; }
+  taskbarDriftCheckAt = now;
+  if (desk.lastTaskbarHide === null) { return; }
+  const wanted = desk.lastTaskbarHide;
+  readTaskbarAutoHide((actual) => {
+    if (actual === null) {
+      desk.lastTaskbarHide = null;
+      return;
+    }
+    if (actual !== wanted) {
+      desktopLog('[taskbar] drift actual=' + actual + ' wanted=' + wanted + ' -> reapply');
+      desk.lastTaskbarHide = null;
+      applyTaskbarAutoHide(wanted, { force: true });
+    }
+  });
+}
+
+// --- 状态跃迁：所有定时器在这里统一清理
+function setPlaybackState(playing, source) {
+  const next = Boolean(playing);
+  if (next === desk.isPlaying) {
+    return;
+  }
+  desk.isPlaying = next;
+  if (next) {
+    clearDeskTimer('pauseHide');
+    desk.backstageEnterAt = Date.now();
+  } else {
+    desk.backstageEnterAt = 0;
+  }
+  desktopLog('[state] playing=' + next + (source ? ' (' + source + ')' : ''));
+  tickDesktop();
+}
+
+function setDesktopExposure(exposedForRemote, exposed) {
+  const prevRemote = desk.exposedForRemote;
+  desk.exposed = exposed;
+  desk.exposedForRemote = exposedForRemote;
+  desk.remoteForeground = Boolean(desk.probe && desk.probe.pid === process.pid
+    && desk.probe.title.indexOf(REMOTE_CONTROL_WINDOW_TITLE) !== -1);
+
+  if (exposedForRemote === true && prevRemote !== true) {
+    // 回到桌面：所有「后台」痕迹一次清干净，任务栏缓存强制作废
+    clearDeskTimer('pauseHide');
+    desk.backstageEnterAt = 0;
+    desk.dismissedTrackId = null;
+    desk.lastTaskbarHide = null;
+    desk.taskbarTarget = null;
+    desk.taskbarStable = 0;
+    hideRemoteControlForAuto('desktop');
+    desktopLog('[state] back on desktop -> timers cleared, remote hidden, taskbar cache reset');
+  } else if (exposedForRemote === false && prevRemote === true) {
+    clearDeskTimer('pauseHide');
+    desk.backstageEnterAt = desk.isPlaying ? Date.now() : 0;
+    desk.lastTaskbarHide = null;
+    desk.taskbarTarget = null;
+    desk.taskbarStable = 0;
+    desktopLog('[state] left desktop');
+  }
+}
+
+function noteTrackChange(trackId) {
+  if (!trackId) { return; }
+  if (desk.dismissedTrackId) {
+    desk.dismissedTrackId = null;
+  }
+  desk.backstageEnterAt = desk.isPlaying ? Date.now() : 0;
+  desktopLog('[state] track -> ' + trackId);
+}
+
+// --- 遥控窗定位 / 显示 / 隐藏
+function remoteSecondaryWorkArea() {
+  const displays = screen.getAllDisplays();
+  const primary = screen.getPrimaryDisplay();
+  const secondary = displays.find((display) => display.id !== primary.id) || primary;
+  return secondary.workArea;
+}
+
+function positionRemoteTopCenter() {
+  const wa = remoteSecondaryWorkArea();
+  const bounds = remoteControlWindow.getBounds();
+  const x = Math.round(wa.x + (wa.width - bounds.width) / 2);
+  const y = wa.y + 16;
+  remoteControlWindow.setPosition(x, y, false);
+  return { x, y };
+}
+
+function reassertRemoteWindowTopMost() {
+  try {
+    if (isRemoteControlAlive()) {
+      remoteControlWindow.setAlwaysOnTop(true, 'screen-saver');
+      remoteControlWindow.moveTop();
+      remoteControlWindow.setIgnoreMouseEvents(false);
+    }
+  } catch (error) {
+    desktopLog('remote-auto: topmost failed ' + (error && error.message));
+  }
+}
+
+function pushLatestSnapshotToRemote(reason) {
+  if (!latestRemoteControlSnapshot) {
+    desktopLog('remote-sync: no snapshot yet (' + reason + ')');
+    return false;
+  }
+  const sent = sendRemoteControlSnapshot(latestRemoteControlSnapshot);
+  desk.pushCount += 1;
+  desktopLog('remote-sync: push ' + reason + ' track=' + (remoteTrackIdOf(latestRemoteControlSnapshot) || '?') + ' ok=' + sent);
+  return sent;
+}
+
+// 遥控窗可见期间每 1.5s 重推一次快照（原来在旧块里，重构时弄丢了）
+let remoteSyncTimer = null;
+function ensureRemoteSyncTimer() {
+  if (remoteSyncTimer) {
+    return;
+  }
+  remoteSyncTimer = setInterval(() => {
+    if (!isRemoteControlAlive() || !remoteControlWindow.isVisible()) {
+      return;
+    }
+    if (latestRemoteControlSnapshot) {
+      sendRemoteControlSnapshot(latestRemoteControlSnapshot);
+    }
+  }, 1500);
+  if (typeof remoteSyncTimer.unref === 'function') {
+    remoteSyncTimer.unref();
+  }
+}
+
+function paintRemoteFrame(reason) {
+  try {
+    if (!isRemoteControlAlive()) { return; }
+    remoteControlWindow.webContents.invalidate();
+  } catch (error) {
+    desktopLog('remote-auto: invalidate failed ' + (error && error.message));
+  }
+  lastRemotePushAt = Date.now();
+  pushLatestSnapshotToRemote(reason);
+}
+
+function showRemoteControlInactive() {
+  if (isRemoteControlAlive()) {
+    cancelRemoteAutoDestroy();
+    if (!remoteControlWindow.isVisible()) {
+      // 先把窗口亮出来，任何后续步骤失败都不能影响"出现"这件事
+      try {
+        positionRemoteTopCenter();
+      } catch (error) {
+        desktopLog('remote-auto: position failed ' + (error && error.message));
+      }
+      remoteControlWindow.showInactive();
+      const b = remoteControlWindow.getBounds();
+      desktopLog('remote-auto: showInactive(existing) visible=' + remoteControlWindow.isVisible()
+        + ' bounds=' + b.x + ',' + b.y + ' ' + b.width + 'x' + b.height);
+      try {
+        reassertRemoteWindowTopMost();
+        paintRemoteFrame('show-existing');
+      } catch (error) {
+        desktopLog('remote-auto: post-show failed ' + (error && error.message));
+      }
+    } else if (Date.now() - lastRemotePushAt > 800) {
+      try {
+        paintRemoteFrame('refresh');
+      } catch (error) { /* ignore */ }
+    }
+    return;
+  }
+
+  createRemoteControlWindow({ inactive: true });
+  try {
+    positionRemoteTopCenter();
+  } catch (error) {
+    desktopLog('remote-auto: position failed ' + (error && error.message));
+  }
+  if (remoteControlWindow && !remoteControlWindow.isDestroyed()) {
+    remoteControlWindow.showInactive();
+    const b = remoteControlWindow.getBounds();
+    desktopLog('remote-auto: created visible=' + remoteControlWindow.isVisible()
+      + ' bounds=' + b.x + ',' + b.y + ' ' + b.width + 'x' + b.height);
     try {
-      globalShortcut.register('Control+Alt+F', () => {
-        void (async () => {
-          await enterSearchMode();
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('local-only:open-search');
-          }
-        })();
-      });
+      reassertRemoteWindowTopMost();
+      paintRemoteFrame('show-created');
     } catch (error) {
-      console.warn('[search] global shortcut failed', error && error.message);
+      desktopLog('remote-auto: post-show failed ' + (error && error.message));
+    }
+  }
+}
+
+const REMOTE_AUTO_DESTROY_IDLE_MS = 90000;
+function cancelRemoteAutoDestroy() {
+  clearDeskTimer('remoteDestroy');
+}
+
+let remoteAutoHideInProgress = false;
+function hideRemoteControlForAuto(reason) {
+  if (!isRemoteControlAlive() || !remoteControlWindow.isVisible()) {
+    return;
+  }
+  remoteAutoHideInProgress = true;
+  try {
+    remoteControlWindow.hide();
+  } finally {
+    remoteAutoHideInProgress = false;
+  }
+  desktopLog('remote-auto: hidden (' + reason + ')');
+  cancelRemoteAutoDestroy();
+  deskTimers.remoteDestroy = setTimeout(() => {
+    deskTimers.remoteDestroy = null;
+    if (isRemoteControlAlive() && !remoteControlWindow.isVisible() && !desk.isPlaying) {
+      remoteControlWindow.destroy();
+      desktopLog('remote-auto: destroyed idle window');
+    }
+  }, REMOTE_AUTO_DESTROY_IDLE_MS);
+  if (typeof deskTimers.remoteDestroy.unref === 'function') {
+    deskTimers.remoteDestroy.unref();
+  }
+}
+
+const REMOTE_AUTO_BACKSTAGE_DELAY_MS = 600;
+const REMOTE_AUTO_PAUSE_HIDE_DELAY_MS = 2500;
+
+function currentRemoteTrackId() {
+  const snapshot = latestRemoteControlSnapshot;
+  if (!snapshot) {
+    return null;
+  }
+  return snapshot.trackId
+    || (snapshot.track && (snapshot.track.id || snapshot.track.songId))
+    || null;
+}
+
+function isRemoteControlAlive() {
+  return Boolean(remoteControlWindow && !remoteControlWindow.isDestroyed());
+}
+
+function isRemoteControlVisible() {
+  return isRemoteControlAlive() && remoteControlWindow.isVisible();
+}
+
+function remoteWindowHasFocus() {
+  return isRemoteControlAlive() && remoteControlWindow.isFocused();
+}
+
+/** 每个 500ms tick 调一次（状态跃迁时也会主动调）。 */
+function tickRemoteAuto() {
+  if (!REMOTE_AUTO_ENABLED) {
+    // 关闭期间只保留一件事：如果窗口不知怎么还开着、而且已经回到桌面，就收掉它
+    if (desk.exposedForRemote === true && isRemoteControlVisible()) {
+      hideRemoteControlForAuto('disabled');
+    }
+    return;
+  }
+  const exposed = desk.exposedForRemote === true;
+  const playing = desk.isPlaying;
+
+  // 用户正在点遥控窗：不算回桌面，也不自动收起
+  if (desk.remoteForeground && !exposed) {
+    return;
+  }
+
+  if (playing || exposed) {
+    clearDeskTimer('pauseHide');
+  }
+
+  if (exposed) {
+    desk.dismissedTrackId = null;
+    desk.backstageEnterAt = 0;
+    hideRemoteControlForAuto('desktop');
+    return;
+  }
+
+  if (playing) {
+    if (desk.backstageEnterAt === 0) {
+      desk.backstageEnterAt = Date.now();
+      return;
+    }
+    if (Date.now() - desk.backstageEnterAt < REMOTE_AUTO_BACKSTAGE_DELAY_MS) {
+      return;
+    }
+    const trackId = currentRemoteTrackId();
+    if (trackId && desk.dismissedTrackId && trackId === desk.dismissedTrackId) {
+      return;
+    }
+    showRemoteControlInactive();
+    return;
+  }
+
+  // 后台暂停：挂 2.5 秒，给「暂停后切歌」留余地
+  desk.backstageEnterAt = 0;
+  if (!isRemoteControlVisible() || deskTimers.pauseHide) {
+    return;
+  }
+  deskTimers.pauseHide = setTimeout(() => {
+    deskTimers.pauseHide = null;
+    if (!desk.isPlaying && desk.exposedForRemote !== true) {
+      hideRemoteControlForAuto('pause');
+      desktopLog('remote-auto: hidden after pause');
+    }
+  }, REMOTE_AUTO_PAUSE_HIDE_DELAY_MS);
+  if (typeof deskTimers.pauseHide.unref === 'function') {
+    deskTimers.pauseHide.unref();
+  }
+}
+
+let desktopModeTimer = null;
+let desktopTickCount = 0;
+function tickDesktop() {
+  desktopTickCount += 1;
+  try {
+    if (isSearching) { return; }
+    const probe = probeForeground(false);
+    desk.foregroundClass = probe.cls;
+    desk.foregroundPid = probe.pid;
+    desk.selfForeground = probe.pid === process.pid;
+    setDesktopExposure(
+      classifyForeground(probe, 'remote'),
+      classifyForeground(probe, 'taskbar'),
+    );
+
+    if (desk.exposed) {
+      registerSearchAccelerator();
+    } else {
+      unregisterSearchAccelerator();
     }
 
-    startDesktopModeWatch();
+    try {
+      tickRemoteAuto();
+    } catch (remoteError) {
+      desktopLog('remote-auto tick failed: ' + (remoteError && remoteError.message));
+    }
+
+    const target = desk.isPlaying && desk.exposed === true;
+    if (target === desk.taskbarTarget) {
+      desk.taskbarStable += 1;
+    } else {
+      desk.taskbarTarget = target;
+      desk.taskbarStable = 1;
+    }
+    if (desktopTickCount <= 3 || target !== desk.lastTaskbarHide) {
+      desktopLog('tick playing=' + desk.isPlaying + ' exposed=' + desk.exposed
+        + ' exposedForRemote=' + desk.exposedForRemote + ' fg=' + (probe.cls || 'none')
+        + '/' + probe.pid + ' targetHide=' + target + ' stable=' + desk.taskbarStable);
+    }
+    if (desk.taskbarStable >= 3) {
+      applyTaskbarAutoHide(target);
+    }
+    verifyTaskbarDrift();
+  } catch (error) {
+    desktopLog('tick failed: ' + (error && error.message));
+  }
+}
+
+function startDesktopModeWatch() {
+  if (desktopModeTimer) {
+    return;
+  }
+  desktopModeTimer = setInterval(tickDesktop, 500);
+  if (typeof desktopModeTimer.unref === 'function') {
+    desktopModeTimer.unref();
+  }
+  tickDesktop();
+}
+
+ipcMain.on('local-only:playback-state', (event, playing) => {
+  setPlaybackState(playing, 'renderer');
+});
+
+// 调试探针：FOLIA_REMOTE_PROBE=1 时忽略播放态，直接弹一次遥控窗并打印坐标。
+// 仅用于验证「窗口能不能出现 / 坐标对不对」，不改变正常行为。
+if (REMOTE_AUTO_ENABLED && process.env.FOLIA_REMOTE_PROBE === '1') {
+  setTimeout(() => {
+    try {
+      desktopLog('[probe] forcing remote window');
+      showRemoteControlInactive();
+      setTimeout(() => {
+        const b = remoteControlWindow.getBounds();
+        desktopLog('[probe] visible=' + remoteControlWindow.isVisible()
+          + ' bounds=' + b.x + ',' + b.y + ' ' + b.width + 'x' + b.height);
+      }, 800);
+    } catch (error) {
+      desktopLog('[probe] failed ' + (error && error.message));
+    }
+  }, 12000);
+}
+
+
+// ===== SEARCH HOTKEY / 搜索唤起链路（自包含） =====
+let isSearching = false;
+let searchDetachedWallpaper = false;
+const SEARCH_LOG_PATH = require('path').join(app.getPath('userData'), 'search-debug.log');
+function searchLog(message) {
+  try {
+    require('fs').appendFileSync(SEARCH_LOG_PATH, new Date().toISOString() + '  ' + message + '\r\n');
+  } catch (error) { /* ignore */ }
+}
+
+
+// 搜索态需要真正的顶级窗口：脱离 WorkerW 后光靠 Electron 的 setBounds/focus 在多屏
+// 虚拟坐标下仍会停在屏幕外（实测 bounds={x:1080,y:446}）。这里直接用 Win32 干三件事：
+// 去掉 WS_CHILD 加 WS_POPUP、HWND_TOPMOST 钉到主屏 0,0,1920,1080、SetForegroundWindow 抢焦点。
+let searchWin32 = null;
+function searchWin32Api() {
+  if (searchWin32) {
+    return searchWin32;
+  }
+  const koffi = require('koffi');
+  const user32 = koffi.load('user32.dll');
+  searchWin32 = {
+    getWindowLongPtr: user32.func('intptr_t GetWindowLongPtrW(void* hWnd, int nIndex)'),
+    setWindowLongPtr: user32.func('intptr_t SetWindowLongPtrW(void* hWnd, int nIndex, intptr_t dwNewLong)'),
+    setWindowPos: user32.func('bool SetWindowPos(void* hWnd, void* hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags)'),
+    setForegroundWindow: user32.func('bool SetForegroundWindow(void* hWnd)'),
+    showWindow: user32.func('bool ShowWindow(void* hWnd, int nCmdShow)'),
+  };
+  return searchWin32;
+}
+
+function mainWindowHandleBigInt() {
+  const buffer = mainWindow.getNativeWindowHandle();
+  return buffer.length >= 8 ? buffer.readBigUInt64LE(0) : BigInt(buffer.readUInt32LE(0));
+}
+
+function forceSearchWindowOnPrimary() {
+  try {
+    const api = searchWin32Api();
+    const hwnd = mainWindowHandleBigInt();
+    const GWL_STYLE = -16;
+    const WS_CHILD = 0x40000000;
+    const WS_POPUP = 0x80000000;
+    let style = api.getWindowLongPtr(hwnd, GWL_STYLE);
+    style = (style & ~WS_CHILD) | WS_POPUP;
+    api.setWindowLongPtr(hwnd, GWL_STYLE, style);
+    // HWND_TOPMOST = -1, SWP_SHOWWINDOW 0x40 | SWP_FRAMECHANGED 0x20
+    api.setWindowPos(hwnd, BigInt(-1), 0, 0, 1920, 1080, 0x60);
+    api.showWindow(hwnd, 5);
+    api.setForegroundWindow(hwnd);
+    searchLog('win32: style=0x' + (style >>> 0).toString(16) + ' hwnd pinned to 0,0,1920,1080');
+    return true;
+  } catch (error) {
+    searchLog('win32 pin FAILED: ' + (error && error.message));
+    return false;
+  }
+}
+
+// ===== 迷你搜索弹窗：独立的小窗口接管输入，主墙永远待在 WorkerW =====
+let searchPopupWindow = null;
+
+function searchPopupHtml() {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+  html,body{margin:0;height:100%;background:transparent;overflow:hidden}
+  .wrap{box-sizing:border-box;width:100%;height:100%;display:flex;align-items:center;gap:14px;
+        padding:0 22px;border-radius:18px;background:rgba(20,22,28,.94);
+        border:1.5px solid rgba(255,255,255,.28);
+        box-shadow:0 20px 50px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.08);
+        backdrop-filter:blur(20px);font-family:'Microsoft YaHei',system-ui,sans-serif}
+  .wrap:focus-within{border-color:rgba(120,180,255,.75);
+        box-shadow:0 20px 50px rgba(0,0,0,.65), 0 0 0 3px rgba(120,180,255,.18), inset 0 1px 0 rgba(255,255,255,.10)}
+  svg{flex:0 0 auto;opacity:.75}
+  input{flex:1;height:40px;border:0;outline:0;background:transparent;color:#fff;
+        font-size:22px;font-weight:500;letter-spacing:.2px}
+  input::placeholder{color:rgba(255,255,255,.42);font-weight:400}
+  .esc{flex:0 0 auto;font-size:11px;letter-spacing:.5px;color:rgba(255,255,255,.55);
+       border:1px solid rgba(255,255,255,.22);border-radius:6px;padding:3px 8px}
+  </style></head><body><div class="wrap">
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"
+       stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+  <input id="q" autofocus placeholder="搜索歌曲 / 歌手 / 专辑...  (Esc 退出)">
+  <span class="esc">ESC</span></div>
+  <script>
+  const { ipcRenderer } = require('electron');
+  const q = document.getElementById('q');
+  q.addEventListener('input', () => {
+    const value = q.value;
+    ipcRenderer.send('local-only:search-popup-query', value);
+    if (value.trim() === '') ipcRenderer.send('local-only:search-popup-clear');
+  });
+  q.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { ipcRenderer.send('local-only:search-popup-close'); }
+    if (event.key === 'Escape') { ipcRenderer.send('local-only:search-popup-clear'); }
+  });
+  // 失焦只隐藏弹窗，绝不清空过滤：否则点海报时鼠标一按下就把墙弹回全库，点不到目标。
+  window.addEventListener('blur', () => ipcRenderer.send('local-only:search-popup-close'));
+  </script></body></html>`;
+}
+
+function ensureSearchPopupWindow() {
+  if (searchPopupWindow && !searchPopupWindow.isDestroyed()) {
+    return searchPopupWindow;
+  }
+  const primary = screen.getPrimaryDisplay().bounds;
+  const width = 620;
+  const height = 76;
+  searchPopupWindow = new BrowserWindow({
+    width,
+    height,
+    x: primary.x + Math.round((primary.width - width) / 2),
+    y: primary.y + Math.round((primary.height - height) / 2),
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    show: false,
+    nodeIntegration: true,
+    contextIsolation: false,
+    webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false },
+  });
+  searchPopupWindow.setAlwaysOnTop(true, 'screen-saver');
+  searchPopupWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(searchPopupHtml()));
+  searchPopupWindow.on('closed', () => { searchPopupWindow = null; });
+  return searchPopupWindow;
+}
+
+function openSearchPopup() {
+  const win = ensureSearchPopupWindow();
+  const primary = screen.getPrimaryDisplay().bounds;
+  win.setBounds({
+    x: primary.x + Math.round((primary.width - 620) / 2),
+    y: primary.y + Math.round((primary.height - 76) / 2),
+    width: 620,
+    height: 76,
+  });
+  win.show();
+  win.focus();
+  win.webContents.focus();
+  searchLog('search popup shown');
+}
+
+function closeSearchPopup() {
+  if (searchPopupWindow && !searchPopupWindow.isDestroyed()) {
+    searchPopupWindow.hide();
+    searchLog('search popup hidden');
+  }
+}
+
+ipcMain.on('local-only:search-popup-query', (event, text) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('local-only:search-query', String(text ?? ''));
+  }
+});
+
+ipcMain.on('local-only:search-popup-close', () => { closeSearchPopup(); });
+
+ipcMain.on('local-only:search-popup-clear', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('local-only:search-query', '');
+  }
+  closeSearchPopup();
+});
+
+async function enterSearchMode() {
+  // 不再 detach / 置顶 / setBounds：主窗口永远留在 WorkerW 底层，否则会自动隐藏任务栏的
+  // 底边热区被顶级窗口挡掉。搜索由独立的迷你弹窗接管。
+  searchLog('enter-search: no-op (popup handles input)');
+  return true;
+}
+
+async function exitSearchMode() {
+  // 同样不挂回/不移动窗口
+  searchLog('exit-search: no-op');
+  return true;
+}
+
+ipcMain.handle('local-only:enter-search', async () => {
+  searchLog('IPC enter-search received');
+  const ok = await enterSearchMode();
+  return ok;
+});
+
+ipcMain.handle('local-only:exit-search', async () => {
+  searchLog('IPC exit-search received');
+  return exitSearchMode();
+});
+
+const SEARCH_ACCELERATOR = 'CommandOrControl+F';
+let searchAcceleratorRegistered = false;
+
+// 只在「人正在看桌面」时占用 Ctrl+F：一旦切去浏览器/Word，立刻释放，
+// 绝不把系统的 Ctrl+F 全局抢走。
+function registerSearchAccelerator() {
+  if (searchAcceleratorRegistered) {
+    return;
+  }
+  try {
+    const ok = globalShortcut.register(SEARCH_ACCELERATOR, () => {
+      searchLog('HOTKEY fired: ' + SEARCH_ACCELERATOR);
+      openSearchPopup();
+    });
+    searchAcceleratorRegistered = ok;
+    searchLog('dynamic register ' + SEARCH_ACCELERATOR + ' -> ' + ok);
+    const locateOk = globalShortcut.register('Alt+F', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('local-only:locate-playing');
+        searchLog('HOTKEY fired: Alt+F (locate)');
+      }
+    });
+    searchLog('dynamic register Alt+F -> ' + locateOk);
+    // 海报墙洗牌：Alt+R 打乱，Alt+Shift+R 恢复默认顺序
+    const shuffleOk = globalShortcut.register('Alt+R', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('local-only:shuffle-wall', 'shuffle');
+        searchLog('HOTKEY fired: Alt+R (shuffle)');
+      }
+    });
+    const resetOk = globalShortcut.register('Alt+Shift+R', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('local-only:shuffle-wall', 'reset');
+        searchLog('HOTKEY fired: Alt+Shift+R (reset)');
+      }
+    });
+    searchLog('dynamic register Alt+R -> ' + shuffleOk + ', Alt+Shift+R -> ' + resetOk);
+  } catch (error) {
+    searchLog('dynamic register threw: ' + (error && error.message));
+  }
+}
+
+function unregisterSearchAccelerator() {
+  if (!searchAcceleratorRegistered) {
+    return;
+  }
+  try {
+    globalShortcut.unregister(SEARCH_ACCELERATOR);
+    globalShortcut.unregister('Alt+F');
+    globalShortcut.unregister('Alt+R');
+    globalShortcut.unregister('Alt+Shift+R');
+  } catch (error) { /* ignore */ }
+  searchAcceleratorRegistered = false;
+  searchLog('dynamic unregister ' + SEARCH_ACCELERATOR);
+}
+
+
+// ===== 单实例：在最前沿同步抢锁，拿不到就直接退出（不初始化任何东西）=====
+const AUDIO_EXTS = new Set(['.mp3', '.flac', '.wav', '.m4a', '.ogg', '.aac', '.opus']);
+let pendingExternalTrackPath = null;
+
+function extractAudioPathFromArgv(argv) {
+  if (!Array.isArray(argv)) {
+    return null;
+  }
+  for (const raw of argv) {
+    if (!raw || typeof raw !== 'string' || raw.startsWith('-')) {
+      continue;
+    }
+    let candidate = raw.trim().replace(/^"|"$/g, '');
+    if (candidate.startsWith('file://')) {
+      try {
+        candidate = decodeURIComponent(new URL(candidate).pathname).replace(/^\/([A-Za-z]:)/, '$1');
+      } catch (error) { /* keep raw */ }
+    }
+    const ext = require('path').extname(candidate).toLowerCase();
+    if (!AUDIO_EXTS.has(ext)) {
+      continue;
+    }
+    try {
+      if (require('fs').existsSync(candidate)) {
+        return require('path').resolve(candidate);
+      }
+    } catch (error) { /* ignore */ }
+  }
+  return null;
+}
+
+pendingExternalTrackPath = extractAudioPathFromArgv(process.argv) || pendingExternalTrackPath;
+
+ipcMain.handle('local-only:consume-pending-external-file', () => {
+  const target = pendingExternalTrackPath;
+  pendingExternalTrackPath = null;
+  return target;
+});
+
+
+// ===== E:\音乐 目录热更新：监听增删改，通知渲染层刷新曲库 =====
+let libraryWatchTimer = null;
+let libraryWatcher = null;
+const LIBRARY_DIR = 'E:\\音乐';
+
+function startLibraryWatcher() {
+  if (libraryWatcher || process.platform !== 'win32') {
+    return;
+  }
+  try {
+    if (!require('fs').existsSync(LIBRARY_DIR)) {
+      return;
+    }
+    libraryWatcher = require('fs').watch(LIBRARY_DIR, { recursive: true }, (_event, filename) => {
+      if (filename) {
+        const ext = require('path').extname(String(filename)).toLowerCase();
+        if (ext && !AUDIO_EXTS.has(ext)) {
+          return;
+        }
+      }
+      if (libraryWatchTimer) {
+        clearTimeout(libraryWatchTimer);
+      }
+      libraryWatchTimer = setTimeout(() => {
+        libraryWatchTimer = null;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('local-only:library-fs-changed');
+          console.log('[library] fs changed -> notify renderer');
+        }
+      }, 800);
+    });
+    console.log('[library] watching', LIBRARY_DIR);
+  } catch (error) {
+    console.warn('[library] watch failed', error && error.message);
+  }
+}
+
+
+// ===== folia-ext://：库外音频直读（支持 Range，能拖动进度条）=====
+const EXT_MIME = {
+  '.mp3': 'audio/mpeg',
+  '.flac': 'audio/flac',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/ogg',
+};
+
+function registerExtProtocol() {
+  protocol.handle('folia-ext', async (request) => {
+    try {
+      const url = new URL(request.url);
+      const filePath = url.searchParams.get('path');
+      if (!filePath) {
+        return new Response('missing path', { status: 400 });
+      }
+      const ext = require('path').extname(filePath).toLowerCase();
+      const mime = EXT_MIME[ext];
+      if (!mime) {
+        return new Response('unsupported type', { status: 415 });
+      }
+      const stat = await require('fs/promises').stat(filePath);
+      if (!stat.isFile()) {
+        return new Response('not a file', { status: 404 });
+      }
+      const range = request.headers.get('range');
+      const baseHeaders = {
+        'Content-Type': mime,
+        'Accept-Ranges': 'bytes',
+      };
+      if (range) {
+        const match = /bytes=(\d*)-(\d*)/.exec(range);
+        const start = match && match[1] ? Number(match[1]) : 0;
+        const end = match && match[2] ? Number(match[2]) : Math.max(0, stat.size - 1);
+        const chunk = end - start + 1;
+        const stream = require('stream').Readable.toWeb(
+          require('fs').createReadStream(filePath, { start, end }),
+        );
+        return new Response(stream, {
+          status: 206,
+          headers: {
+            ...baseHeaders,
+            'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+            'Content-Length': String(chunk),
+          },
+        });
+      }
+      const stream = require('stream').Readable.toWeb(require('fs').createReadStream(filePath));
+      return new Response(stream, {
+        status: 200,
+        headers: { ...baseHeaders, 'Content-Length': String(stat.size) },
+      });
+    } catch (error) {
+      console.warn('[folia-ext] failed', error && error.message);
+      return new Response('error', { status: 500 });
+    }
+  });
+  console.log('[folia-ext] protocol registered');
+}
+
+
+// ===== thumb://：把任意封面 URL 降采样成 280×280 JPEG 并缓存（并发 4）=====
+let thumbActive = 0;
+const thumbQueue = [];
+
+async function runWithLimit(task) {
+  if (thumbActive >= 4) {
+    await new Promise(resolve => thumbQueue.push(resolve));
+  }
+  thumbActive += 1;
+  try {
+    return await task();
+  } finally {
+    thumbActive -= 1;
+    const next = thumbQueue.shift();
+    if (next) next();
+  }
+}
+
+const THUMB_DIR = require('path').join(app.getPath('userData'), 'wall-thumbs');
+
+function registerThumbProtocol() {
+  protocol.handle('thumb', async (request) => {
+    try {
+      const url = new URL(request.url);
+      const src = url.searchParams.get('src');
+      if (!src) {
+        return new Response('missing src', { status: 400 });
+      }
+      const crypto = require('crypto');
+      const key = crypto.createHash('sha1').update(src).digest('hex');
+      const file = require('path').join(THUMB_DIR, key + '.jpg');
+      const fsp = require('fs/promises');
+
+      try {
+        const cached = await fsp.readFile(file);
+        return new Response(cached, {
+          status: 200,
+          headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'max-age=604800' },
+        });
+      } catch (error) { /* 未命中，现做 */ }
+
+      const bytes = await runWithLimit(async () => {
+        const response = await electronNet.fetch(src);
+        if (!response.ok) return null;
+        const buffer = Buffer.from(await response.arrayBuffer());
+        const image = nativeImage.createFromBuffer(buffer);
+        if (image.isEmpty()) return null;
+        const resized = image.resize({ width: 280, height: 280, quality: 'good' });
+        return resized.toJPEG(82);
+      });
+
+      if (!bytes) {
+        return new Response('cannot read source', { status: 404 });
+      }
+      await fsp.mkdir(THUMB_DIR, { recursive: true });
+      await fsp.writeFile(file, bytes);
+      return new Response(bytes, {
+        status: 200,
+        headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'max-age=604800' },
+      });
+    } catch (error) {
+      return new Response('error', { status: 500 });
+    }
+  });
+  console.log('[thumb] protocol registered');
+}
+
+
+// FOLIA_METRICS_DUMP: 启动后打印一次进程画像，落到 userData/folia-metrics.log
+app.whenReady().then(() => {
+  setTimeout(() => {
+    try {
+      const rows = app.getAppMetrics().map((metric) => ({
+        type: metric.type,
+        pid: metric.pid,
+        workingSetMB: Math.round((metric.memory?.workingSetSize ?? 0) / 1024 * 10) / 10,
+        peakMB: Math.round((metric.memory?.peakWorkingSetSize ?? 0) / 1024 * 10) / 10,
+        privateMB: Math.round((metric.memory?.privateBytes ?? 0) / 1024 * 10) / 10,
+      }));
+      const total = rows.reduce((sum, row) => sum + row.workingSetMB, 0);
+      const line = JSON.stringify({ total: Math.round(total), rows });
+      console.log('[metrics]', line);
+      try {
+        require('node:fs').appendFileSync(
+          require('node:path').join(app.getPath('userData'), 'folia-metrics.log'),
+          line + '\n',
+        );
+      } catch {}
+    } catch (error) {
+      console.error('[metrics] failed', error);
+    }
+  }, 20000);
+});
+app.whenReady().then(async () => {
+    try { registerThumbProtocol(); } catch (error) { console.warn('[thumb] register failed', error && error.message); }
+    try { registerExtProtocol(); } catch (error) { console.warn('[folia-ext] register failed', error && error.message); }
+    try { setTimeout(() => startLibraryWatcher(), 3000); } catch (error) { console.warn('[library] schedule failed', error && error.message); }
+    try {
+      setTimeout(() => {
+        try {
+          try { startDesktopModeWatch(); } catch (error) { desktopLog('start failed: ' + (error && error.message)); }
+        } catch (error) {
+          console.warn('[desktop-mode] start failed', error && error.message);
+        }
+      }, 1000);
+    } catch (error) {
+      console.warn('[desktop-mode] schedule failed', error && error.message);
+    }
+    // 壁纸窗口平时拿不到键盘焦点，页面里监听的 / 和 Ctrl+F 收不到，所以搜索必须有一个
+    // 全局快捷键：Ctrl+Alt+F。按下去先解挂 WorkerW 拿真焦点，再让渲染层弹出搜索框。
+    // [search] 快捷键注册见下方 SEARCH HOTKEY 段
+
     // [local-only] Nothing this app asks for may leave the machine. The renderer already replaces
     // fetch/XHR/WebSocket; this is the second gate, for requests made from the main process or by
     // a worker it hosts. file:, data:, blob: and the app's own protocols are untouched.
@@ -6603,9 +7782,16 @@ app.whenReady().then(async () => {
   focusMainWindow();
   // 启动兜底：窗口创建后必须真的显示出来。之前把「播放→全屏」链路去掉后，
   // show() 只在那条链路里被调用，结果非壁纸模式启动时窗口一直是隐藏的（vis=False）。
-  if (mainWindow && !mainWindow.isDestroyed() && !isWindowsWallpaperMode()) {
-    mainWindow.show();
-  }
+  // createWindow() 里的窗口对象可能是异步赋值的，这里用最朴素的方式兜一次底：
+  // 1.5 秒后还没可见就 show()。壁纸模式交给 helper 自己显示，不去干预。
+  setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || isWindowsWallpaperMode()) {
+      return;
+    }
+    if (!mainWindow.isVisible()) {
+      mainWindow.show();
+    }
+  }, 1500);
 
   if (process.env.FOLIA_PENDING_DESKTOP_LYRIC === '1') {
     delete process.env.FOLIA_PENDING_DESKTOP_LYRIC;
@@ -8142,6 +9328,7 @@ ipcMain.handle('global-shortcuts-set', (event, accelerators) => {
   return getGlobalShortcutController().apply(accelerators);
 });
 
+app.on('will-quit', () => { unregisterSearchAccelerator(); });
 app.on('will-quit', () => {
   appleMusicClient.close();
   stageApi.dispose();
@@ -8176,6 +9363,12 @@ ipcMain.handle('remote-control-toggle', (event) => {
   }
 
   if (remoteControlWindow && !remoteControlWindow.isDestroyed()) {
+    const manualTrackId = currentRemoteTrackId();
+    if (manualTrackId) {
+      desk.dismissedTrackId = manualTrackId;
+    }
+    clearDeskTimer('pauseHide');
+    desktopLog('remote-auto: manual toggle-close, dismissed=' + manualTrackId);
     remoteControlWindow.close();
     return false;
   }
@@ -8193,6 +9386,13 @@ ipcMain.handle('remote-control-close', (event) => {
     return false;
   }
 
+  // 用户手动关掉：记住这一首，同一首不再自动弹（自动隐藏走 hideRemoteControlForAuto，不经过这里）
+  const manualTrackId = currentRemoteTrackId();
+  if (manualTrackId) {
+    desk.dismissedTrackId = manualTrackId;
+  }
+  clearDeskTimer('pauseHide');
+  desktopLog('remote-auto: manual close, dismissed=' + manualTrackId);
   remoteControlWindow.close();
   return true;
 });
@@ -8268,6 +9468,17 @@ ipcMain.handle('remote-control-set-queue-expansion', (event, wantedHeight, optio
 });
 
 ipcMain.handle('remote-control-publish-snapshot', (event, snapshot) => {
+  try {
+    const nextTrack = snapshot && snapshot.trackId;
+    const prevTrack = latestRemoteControlSnapshot && latestRemoteControlSnapshot.trackId;
+    if (nextTrack && nextTrack !== prevTrack) {
+      desktopLog('remote-sync: track change ' + prevTrack + ' -> ' + nextTrack);
+      noteTrackChange(nextTrack);
+      // 切歌要立刻把新快照推到浮窗，不能等 1.5s 的同步定时器
+      setTimeout(() => { paintRemoteFrame('track-change'); }, 0);
+    }
+  } catch (error) { /* ignore */ }
+
   if (!isTrustedMainWindowContents(event.sender)) {
     throw new Error('Untrusted renderer attempted to publish remote control state.');
   }
@@ -8671,3 +9882,95 @@ ipcMain.handle('segment-lyrics', firstParty('segment-lyrics', async (event, line
     throw new Error(message);
   }
 }));
+
+
+// ===== 压测钩子（HTTP，127.0.0.1:50799）：FOLIA_STRESS_TEST=1 或 userData/stress-on 存在时启用 =====
+// GET  /state  -> 当前状态机快照
+// POST /cmd    -> { playing?, trackId?, show?, hide?, reset? }
+function stressHarnessEnabled() {
+  try {
+    if (process.env.FOLIA_STRESS_TEST === '1') {
+      return true;
+    }
+    return require('fs').existsSync(require('path').join(app.getPath('userData'), 'stress-on'));
+  } catch (error) {
+    return false;
+  }
+}
+
+if (stressHarnessEnabled()) {
+  app.whenReady().then(() => {
+    const http = require('http');
+
+    const snapshotState = () => ({
+      at: Date.now(),
+      playing: desk.isPlaying,
+      exposed: desk.exposed,
+      exposedForRemote: desk.exposedForRemote,
+      remoteVisible: isRemoteControlVisible(),
+      remoteFocused: isRemoteControlAlive() ? remoteControlWindow.isFocused() : false,
+      remoteBounds: isRemoteControlAlive() ? remoteControlWindow.getBounds() : null,
+      dismissedTrackId: desk.dismissedTrackId,
+      pushCount: desk.pushCount,
+      lastTaskbarHide: desk.lastTaskbarHide,
+      foregroundClass: desk.foregroundClass,
+      foregroundPid: desk.foregroundPid,
+    });
+
+    const applyCmd = (cmd) => {
+      if (typeof cmd.playing === 'boolean') {
+        setPlaybackState(cmd.playing, 'stress');
+      }
+      if (cmd.trackId) {
+        latestRemoteControlSnapshot = {
+          ...(latestRemoteControlSnapshot || {}),
+          trackId: cmd.trackId,
+          title: cmd.trackId,
+          playing: desk.isPlaying,
+        };
+        noteTrackChange(cmd.trackId);
+        paintRemoteFrame('stress-track');
+      }
+      if (cmd.reset === true) {
+        desk.dismissedTrackId = null;
+        desk.lastTaskbarHide = null;
+      }
+      if (cmd.show === true) {
+        showRemoteControlInactive();
+      }
+      if (cmd.hide === true) {
+        hideRemoteControlForAuto('stress');
+      }
+      desktopLog('[stress] cmd ' + JSON.stringify(cmd));
+    };
+
+    const server = http.createServer((req, res) => {
+      const reply = (code, payload) => {
+        res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      if (req.method === 'GET' && req.url.indexOf('/state') === 0) {
+        reply(200, snapshotState());
+        return;
+      }
+      if (req.method === 'POST' && req.url.indexOf('/cmd') === 0) {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          try {
+            const cmd = JSON.parse(body || '{}');
+            applyCmd(cmd);
+            reply(200, { ok: true, state: snapshotState() });
+          } catch (error) {
+            desktopLog('[stress] cmd failed: ' + (error && error.message));
+            reply(400, { ok: false, error: String(error && error.message) });
+          }
+        });
+        return;
+      }
+      reply(404, { ok: false });
+    });
+    server.on('error', (error) => desktopLog('[stress] server error ' + (error && error.message)));
+    server.listen(50799, '127.0.0.1', () => desktopLog('[stress] http on 50799'));
+  });
+}

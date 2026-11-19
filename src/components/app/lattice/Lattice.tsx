@@ -12,6 +12,7 @@ import { buildLatticeTiles, type LatticeTile } from './latticeModel';
 import { useStableCallbacks } from '../../../hooks/useStableCallbacks';
 import { useLatticeSettingsStore } from '../../../stores/useLatticeSettingsStore';
 import { useAppViewStore } from '../../../stores/useAppViewStore';
+import { usePlaybackStore } from '../../../stores/usePlaybackStore';
 import { countRender } from '../../../dev/renderCount';
 import '../../wall/wall.css';
 import './Lattice.css';
@@ -49,6 +50,8 @@ type LatticeProps = {
     playbackDuration: number;
     canTogglePlayback: boolean;
     queue: SongResult[];
+    /** 海报墙的数据源：传了就用它（通常是全量本地曲库），否则退回 queue。 */
+    wallSongs?: SongResult[];
     isDaylight: boolean;
     onBack: () => void;
     /** 工具面板的「主页」：总是回首页（左上角返回仍是历史返回）；缺省时没有那一格。 */
@@ -71,6 +74,25 @@ const searchKeyOf = (song: SongResult): string => (
     `${song.name}\u0000${(song.artists ?? []).map(artist => artist.name).join(' ')}\u0000${song.album?.name ?? ''}`.toLowerCase()
 );
 
+
+/** 确定性洗牌：同一个 seed 永远得到同一个顺序，纯索引重排，不 clone 深层对象。 */
+const shuffleWithSeed = (list: SongResult[], seed: number): SongResult[] => {
+    if (!seed) {
+        return list;
+    }
+    let seedValue = seed * 9301 + 49297;
+    const nextRandom = () => {
+        seedValue = (seedValue * 9301 + 49297) % 233280;
+        return seedValue / 233280;
+    };
+    const shuffled = [...list];
+    for (let i = shuffled.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(nextRandom() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+};
+
 export default function Lattice({
     controls,
     lyrics,
@@ -83,6 +105,7 @@ export default function Lattice({
     playbackDuration,
     canTogglePlayback,
     queue,
+    wallSongs,
     isDaylight,
     onGoHome,
     onOpenPlayer,
@@ -133,9 +156,37 @@ export default function Lattice({
         setSettledQuery(query.trim().toLowerCase());
     }, [query]);
 
+    const wallQueue = wallSongs && wallSongs.length > 0 ? wallSongs : queue;
+
+    // 洗牌：只改视觉排列，不动 wallQueue 本身，也不打断播放。
+    // 同一个 seed 得到同一个顺序，所以定位/搜索在洗牌后依然可预期。
+    // 启动即洗牌（非 0 种子），并默认开启每分钟自动轮换
+    const [shuffleSeed, setShuffleSeed] = useState(0);
+    const shuffleSeedRef = useRef(0);
+    const wallQueueRef = useRef<SongResult[]>([]);
+    wallQueueRef.current = wallQueue;
+
+    const displayWall = useMemo(
+        () => shuffleWithSeed(wallQueue, shuffleSeed),
+        [wallQueue, shuffleSeed],
+    );
+
     const filteredQueue = useMemo(() => (
-        settledQuery ? queue.filter(song => searchKeyOf(song).includes(settledQuery)) : queue
-    ), [queue, settledQuery]);
+        settledQuery ? displayWall.filter(song => searchKeyOf(song).includes(settledQuery)) : displayWall
+    ), [displayWall, settledQuery]);
+
+    useEffect(() => {
+        const off = window.electron?.onShuffleWall?.((mode) => {
+            // 注意：绝不能在 setState 的 updater 里调用 store setter —— 那是更新期副作用，
+            // 会让 React 反复调度直到渲染进程崩掉（实测 120s 内进程消失）。
+            const next = mode === 'reset' ? 0 : shuffleSeedRef.current + 1;
+            shuffleSeedRef.current = next;
+            setShuffleSeed(next);
+            const ordered = shuffleWithSeed(wallQueueRef.current, next);
+            usePlaybackStore.getState().setPlayQueue(ordered);
+        });
+        return () => off?.();
+    }, []);
 
     const queueTiles = useMemo(() => buildLatticeTiles({ queue: filteredQueue, currentSong }), [currentSong, filteredQueue]);
     const tiles = isExplore ? explore.tiles : queueTiles;
@@ -187,12 +238,19 @@ export default function Lattice({
             ) return;
 
             event.preventDefault();
+            // 过滤态下要定位的那首可能被筛掉了：先恢复整面墙，下一帧再定位。
+            if (settledQuery) {
+                setQuery('');
+                setSettledQuery('');
+                window.requestAnimationFrame(() => locatePlayingSongOnWall());
+                return;
+            }
             locatePlayingSongOnWall();
         };
 
         window.addEventListener('keydown', handleLocateKey);
         return () => window.removeEventListener('keydown', handleLocateKey);
-    }, []);
+    }, [settledQuery]);
 
 
     // 壁纸模式下窗口是 WorkerW 的子窗口，拿不到 WM_CHAR：先让主进程解挂成顶级窗口再聚焦。
@@ -213,6 +271,46 @@ export default function Lattice({
         };
         requestAnimationFrame(() => focusInput(0));
     }, []);
+
+    // 壁纸底层收不到单键 F（被桌面图标首字母跳转吃掉），定位改由主进程 Alt+F 推过来。
+    useEffect(() => {
+        const off = window.electron?.onLocatePlaying?.(() => {
+            if (settledQuery) {
+                setQuery('');
+                setSettledQuery('');
+                window.requestAnimationFrame(() => locatePlayingSongOnWall());
+                return;
+            }
+            locatePlayingSongOnWall();
+        });
+        return () => off?.();
+    }, [settledQuery]);
+
+    // 迷你搜索弹窗把关键词推进来：直接过滤（不经过墙上那个输入框）
+    useEffect(() => {
+        const off = window.electron?.onSearchQuery?.((text: string) => {
+            setQuery(text);
+            setSettledQuery(text.trim().toLowerCase());
+            if (!text) {
+                setSearchOpen(false);
+            }
+        });
+        return () => off?.();
+    }, []);
+
+    // 搜不到任何歌时，1.2 秒后全自动回弹到完整海报墙：不需要点按钮、不需要按键。
+    // 用户在 1.2 秒内继续打字，就把定时器清掉重新计时。
+    useEffect(() => {
+        if (!settledQuery || filteredQueue.length > 0) {
+            return undefined;
+        }
+        const timer = window.setTimeout(() => {
+            setQuery('');
+            setSettledQuery('');
+            void window.electron?.exitSearchMode?.();
+        }, 1200);
+        return () => window.clearTimeout(timer);
+    }, [filteredQueue.length, settledQuery]);
 
     // 主进程全局快捷键 Ctrl+Alt+F 唤起搜索（壁纸窗口平时没有键盘焦点，/ 收不到）
     useEffect(() => {
@@ -256,7 +354,15 @@ export default function Lattice({
         const appView = useAppViewStore.getState();
         if (appView.view !== 'lattice') return;
         if (tile.kind === 'song') {
-            onPlaySong(tile.song, tile.queue ?? queue, isRadio && isFm);
+            onPlaySong(tile.song, displayWall, isRadio && isFm);
+            // 起播之后再恢复全墙：顺序反过来会在鼠标按下的瞬间把墙弹回全库，点不到目标。
+            if (settledQuery) {
+                window.requestAnimationFrame(() => {
+                    setQuery('');
+                    setSettledQuery('');
+                    void window.electron?.exitSearchMode?.();
+                });
+            }
             return;
         }
         beginWallTrip('open');
@@ -293,7 +399,7 @@ export default function Lattice({
 
     return (
         <LatticeTransportContext.Provider value={transport}>
-        <LatticePlaybackProvider actions={controls} currentSong={currentSong} queue={queue} lyrics={lyrics}
+        <LatticePlaybackProvider actions={controls} currentSong={currentSong} queue={displayWall} onPlaySong={(song) => onPlaySong(song, displayWall, false)} lyrics={lyrics}
             currentTime={currentTime} lyricCurrentTime={lyricCurrentTime} duration={playbackDuration} onSeek={onSeek} isDaylight={isDaylight}>
         <LatticeLyricsProvider source={lyricSource} songKey={currentSong ? getPlaybackSongKey(currentSong) : ''}
             keywordColoringEnabled={lyricKeywordColoringEnabled}>
@@ -347,7 +453,7 @@ export default function Lattice({
                         className="lattice-search-input"
                         autoFocus
                         value={query}
-                        placeholder="搜索歌名 / 歌手 / 专辑"
+                        placeholder="搜索歌曲 (Ctrl+F)"
                         spellCheck={false}
                         onFocus={() => setSearchOpen(true)}
                         onChange={event => setQuery(event.target.value)}

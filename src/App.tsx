@@ -153,7 +153,8 @@ import { writeLyricOffset } from './utils/lyrics/lyricOffsetMemory';
 import { FALLBACK_AI_DUAL_THEME } from './services/themeSanitizer';
 import { BASE_DUAL_THEME, DAYLIGHT_THEME, DEFAULT_THEME } from './services/baseThemes';
 import { initializeSyncCoordinator } from './services/sync/syncCoordinator';
-import { applyLocalLibraryEntityDisplay } from './services/playbackAdapters';
+import { applyLocalLibraryEntityDisplay, buildUnifiedLocalSong } from './services/playbackAdapters';
+import { getLocalCoverAssetUrl } from './services/localCoverAssetUrl';
 import { transitionCapabilities } from './services/automix/stems';
 import { buildLocalLibraryIndex } from './utils/localLibraryIndex';
 import type { PlayerChromeVisibilityMode } from './types/remoteControl';
@@ -1067,6 +1068,104 @@ export default function App() {
         getDisplaySong,
         endHeldTransition,
     });
+
+    // E:\音乐 有增删改时，主进程通知这里刷新曲库
+    useEffect(() => {
+        const off = window.electron?.onLibraryFsChanged?.(() => {
+            void loadLocalSongs();
+        });
+        return () => off?.();
+    }, [loadLocalSongs]);
+
+    // 海报墙的数据源：全量本地曲库，与播放队列彻底解耦。
+    const fullLibraryWallSongs = useMemo(() => (localSongs ?? []).map(localSong => (
+        buildUnifiedLocalSong({
+            localSong,
+            matchedSong: null,
+            // 恢复原生超清：墙面直接用 1024 级原图，虚拟滚动只解码视口内的封面。
+            coverUrl: getLocalCoverAssetUrl(localSong.localCoverAssetId),
+            preferOnlineMetadata: false,
+        })
+    )) as unknown as SongResult[], [localSongs]);
+
+    const externalPendingConsumedRef = useRef(false);
+
+    // 双击音频文件起播：先按 filePath 命中本地曲库（保留封面/统计/Alt+F 定位），
+    // 库外文件按 LocalSong 的最小合法字段构造后走同一条入队播放路径。
+    useEffect(() => {
+        // 曲库里存的是相对路径（如 音乐/xxx.mp3），双击给的是绝对路径（E:\音乐\xxx.mp3）：
+        // 统一去掉盘符、分隔符转 /、小写，再比较。
+        const toLibraryKey = (value: string) => value
+            .replace(/\\/g, '/')
+            .replace(/^[a-zA-Z]:\//, '')
+            .toLowerCase();
+        const normalize = toLibraryKey;
+        const playExternal = (filePath: string) => {
+            if (!filePath) return;
+            const target = normalize(filePath);
+            const fileNameOnly = filePath.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '';
+            const matched = (localSongs ?? []).find(song => (
+                normalize(song.filePath ?? '') === target
+                || (song.fileName ?? '').toLowerCase() === fileNameOnly
+            ));
+            if (matched) {
+                // handleLocalQueueAdd 只入队不出声，双击必须走 onPlayLocalSong 立刻切歌
+                void onPlayLocalSong(matched, localSongs ?? [], {
+                    unifiedQueue: usePlaybackStore.getState().playQueue,
+                });
+                return;
+            }
+            const fileName = filePath.split(/[\\/]/).pop() ?? filePath;
+            const displayTitle = fileName.replace(/\.[^.]+$/, '');
+            // 临时对象必须把数组类字段补全：playbackAdapters 里会对 artists 之类直接 .map，
+            // 缺字段会抛 "Cannot read properties of undefined (reading 'map')"。
+            const temp = {
+                id: `ext:${target}`,
+                fileName,
+                filePath,
+                duration: 0,
+                fileSize: 0,
+                mimeType: 'audio/mpeg',
+                addedAt: Date.now(),
+                title: displayTitle,
+                titleOrigin: 'filename',
+                // buildUnifiedLocalSong 会读 importedMetadata.artistNames / albumName，
+                // 缺这两个数组就会抛 "Cannot read properties of undefined (reading 'map')"。
+                importedMetadata: {
+                    title: displayTitle,
+                    artistNames: [] as string[],
+                    artists: [] as string[],
+                    albumName: '',
+                    album: '',
+                    albumArtist: '',
+                    year: 0,
+                    trackNumber: 0,
+                    genre: [] as string[],
+                },
+                onlineMetadata: undefined,
+                artists: [] as string[],
+                album: '',
+                hasLocalLyrics: false,
+                hasEmbeddedLyrics: false,
+                fileLastModified: 0,
+                fileSignature: '',
+            } as unknown as Parameters<typeof onPlayLocalSong>[0];
+            // 海报墙的数据源保持整库：临时单曲只作为当前播放对象，不进墙面队列。
+            void onPlayLocalSong(temp, localSongs ?? [], {
+                unifiedQueue: (localSongs ?? []) as unknown as ReturnType<typeof usePlaybackStore.getState>['playQueue'],
+            });
+        };
+        const off = window.electron?.onPlayExternalFile?.(playExternal);
+        // 冷启动：曲库是异步加载的，太早取 pending 会 match 不到，落到无句柄的临时 Song。
+        // 等 localSongs 真的就绪（非空）再取一次，且整次启动只取一回。
+        if (!externalPendingConsumedRef.current && (localSongs?.length ?? 0) > 0) {
+            externalPendingConsumedRef.current = true;
+            void window.electron?.consumePendingExternalFile?.().then(pending => {
+                if (pending) playExternal(pending);
+            });
+        }
+        return () => off?.();
+    }, [localSongs, onPlayLocalSong]);
     const handleSearchResultArtistOpen = useCallback(async (
         track: UnifiedSong,
         artistName: string,
@@ -2850,6 +2949,7 @@ export default function App() {
                                 playbackDuration={displayDuration}
                                 canTogglePlayback={canToggleCurrentPlayback}
                                 queue={playQueue}
+                                wallSongs={fullLibraryWallSongs}
                                 isDaylight={isDaylight}
                                 onBack={navigateBackFromLattice}
                                 onGoHome={navigateToHome}
@@ -2894,7 +2994,7 @@ export default function App() {
               {/* [local-only] 投屏（stage）的客户端已经从构建里去掉，这个空状态页永远不会有用，
                   留着只是白白挂一个组件在渲染树里。 */}
 
-            <AppOverlays model={appOverlaysModel} />
+            <AppOverlays model={appOverlaysModel} hideCapsule={wallpaperMode} />
 
             {/* Folium `app.overlay` stage layers: above the whole app, inert unless a layer opts in. */}
             <FoliumStageLayerSlot

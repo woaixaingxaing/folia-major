@@ -1045,6 +1045,12 @@ declare global {
     setPlaybackPresentation: (mode: 'fullscreen' | 'wallpaper') => Promise<boolean>;
     reportPlaybackState: (playing: boolean) => void;
     onOpenSearch: (callback: () => void) => () => void;
+    onShuffleWall: (callback: (mode: 'shuffle' | 'reset') => void) => () => void;
+    onLibraryFsChanged: (callback: () => void) => () => void;
+    onLocatePlaying: (callback: () => void) => () => void;
+    onPlayExternalFile: (callback: (filePath: string) => void) => () => void;
+    consumePendingExternalFile: () => Promise<string | null>;
+    onSearchQuery: (callback: (query: string) => void) => () => void;
     enterSearchMode: () => Promise<boolean>;
     exitSearchMode: () => Promise<boolean>;
       closeWindow: () => Promise<boolean>;

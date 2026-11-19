@@ -19,7 +19,7 @@ type AppOverlaysProps = {
     model: AppOverlaysModel;
 };
 
-const AppOverlays: React.FC<AppOverlaysProps> = ({ model }) => {
+const AppOverlays: React.FC<AppOverlaysProps & { hideCapsule?: boolean }> = ({ model, hideCapsule }) => {
     countRender('AppOverlays');
     const isCurrentSongPosterVisible = useLatticeControlsStore(state => state.isCurrentSongPosterVisible);
     // 主窗口按宽度在紧凑档和桌面档之间切换（progress-bar v3）。紧凑档里卡片收进胶囊左端，这里不再单独画它；
@@ -60,7 +60,7 @@ const AppOverlays: React.FC<AppOverlaysProps> = ({ model }) => {
 
             {memoryMonitor && <MemoryMonitorWindow {...memoryMonitor} />}
 
-            {floatingControls && showsCapsule && <FloatingPlayerControls {...floatingControls} />}
+            {floatingControls && showsCapsule && !hideCapsule && <FloatingPlayerControls {...floatingControls} />}
 
             {nowPlayingToast && (!capsuleCarriesCard || isPositioningCard) && <NowPlayingToast {...nowPlayingToast} />}
 

@@ -939,27 +939,8 @@ const FloatingPlayerControls: React.FC<FloatingPlayerControlsProps> = ({
                 )}
             </AnimatePresence>
 
-            <LyricsTimelineModal
-                isOpen={isTimelineOpen}
-                onClose={() => setIsTimelineOpen(false)}
-                lyrics={lyrics}
-                duration={duration}
-                currentTime={lyricCurrentTime ?? currentTime}
-                onSeek={(time) => {
-                    const target = resolveLyricSeekMediaTime(time, {
-                        mediaTimeSec: currentTime.get(),
-                        lyricTimeSec: lyricCurrentTime?.get() ?? currentTime.get(),
-                        durationSec: duration,
-                    });
-                    if (target !== null) onSeek(target);
-                }}
-                primaryColor={primaryColor}
-                secondaryColor={secondaryColor}
-                accentColor="var(--text-accent)"
-                theme={theme}
-                isDaylight={isDaylight}
-                disabled={controlsDisabled}
-            />
+            <LyricsTimelineModal isOpen onClose={() => undefined}
+                    queue={[]} currentSong={null} onPlay={() => undefined} isDaylight={false} />
         </>
     );
 };

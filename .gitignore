@@ -109,3 +109,7 @@ public/nebbia-strokes.json
 .coven/
 # ignore workbuddy
 .workbuddy/
+# Electron/打包产物与本地备份：绝不入库
+*.asar
+*.asar.*
+*.bak-*
